@@ -130,6 +130,7 @@ CharacterRenderer::CharacterRenderer(CharacterBank& bank) : bank_(bank) {
     u_mvp_ = glGetUniformLocation(program_, "u_mvp");
     u_bones_ = glGetUniformLocation(program_, "u_bones");
     u_bone_visible_ = glGetUniformLocation(program_, "u_bone_visible");
+    u_lights_ = glGetUniformLocation(program_, "u_lights");
     u_world_ = glGetUniformLocation(program_, "u_world");
     u_tint_ = glGetUniformLocation(program_, "u_tint");
     u_alpha_ = glGetUniformLocation(program_, "u_alpha");
@@ -153,6 +154,7 @@ CharacterRenderer::CharacterRenderer(CharacterBank& bank) : bank_(bank) {
     glGenTextures(1, &white_);
     glBindTexture(GL_TEXTURE_2D, white_);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, &white);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 }
 
 GLuint CharacterRenderer::texture(std::size_t chunk, std::int32_t index) {
