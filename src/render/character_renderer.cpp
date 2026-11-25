@@ -241,6 +241,7 @@ void CharacterRenderer::apply_morph(GpuMesh& mesh, const MorphSelection& sel) {
 
 void CharacterRenderer::draw_mesh(const GpuMesh& mesh, bool fade) {
     if (!mesh.vao) return;
+    glBindVertexArray(mesh.vao);
     glUniform1f(u_env_, mesh.envmap ? 1.0f : 0.0f);
     for (const auto& b : mesh.batches) {
         const Material& m = *b.material;
