@@ -26,6 +26,8 @@ SDL3 is fetched and built statically. Needs a C++20 compiler and OpenGL 3.3.
 Windows packages bundle FFmpeg 8.1 shared libraries under LGPL-3.0; license texts are installed in
 `share/doc/nightfire/licenses`. The pinned FFmpeg source/build release is documented in `docs/packaging.md`.
 
+See [local engine development](docs/development.md) for disc validation, smoke tests, and live launch checks.
+
 ## Tools
 
 - `build/nfdump <gamedir> files|maps|validate`: list FILES.BIN, list level maps, or parse and decode
