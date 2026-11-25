@@ -1,6 +1,7 @@
 // nfdump: inspect and validate Nightfire (PS2) game data.
 //   nfdump <gamedir> files              FILES.BIN index (from ACTION.ELF FileList)
 //   nfdump <gamedir> maps               level .bins with their Map entry and headline models
+//   nfdump <gamedir> placements <level.bin> [class]   authored objects, model refs and parameters
 //   nfdump <gamedir> validate           parse every map chunk file and decode every PS2_GFX block,
 //                                       then decode every sound bank, music track and stream, and self-check
 //                                       the collision world of every level
@@ -11,6 +12,7 @@
 //   nfdump <gamedir> script [level.bin]   mission rows, object census and cutscene scripts
 // <gamedir> holds ACTION.ELF and FILES.BIN extracted from the disc.
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -18,6 +20,7 @@
 #include <exception>
 #include <map>
 #include <string>
+#include <string_view>
 
 #include "assets/collision.hpp"
 #include "assets/game_files.hpp"
@@ -65,6 +68,52 @@ int cmd_maps(GameFiles& gf) {
             std::printf("    %s\n", m.name.c_str());
             if (++shown == 4) break;
         }
+    }
+    return 0;
+}
+
+int cmd_placements(GameFiles& gf, std::string name, std::string_view class_arg) {
+    std::uint32_t filter = 0;
+    const bool filtered = !class_arg.empty();
+    if (filtered) {
+        const bool hex = class_arg.starts_with("0x") || class_arg.starts_with("0X");
+        if (hex) class_arg.remove_prefix(2);
+        const char* end = class_arg.data() + class_arg.size();
+        const auto parsed = std::from_chars(class_arg.data(), end, filter, hex ? 16 : 10);
+        if (parsed.ec != std::errc{} || parsed.ptr != end || filter > 0xFFFF) {
+            std::fprintf(stderr, "class must be a 16-bit decimal or 0x-prefixed hexadecimal value\n");
+            return 2;
+        }
+    }
+    const GameFile* file = gf.find(name);
+    if (!file) {
+        std::fprintf(stderr, "%s: level file not found\n", name.c_str());
+        return 1;
+    }
+    Level level(gf.read(*file));
+    const ChunkFile* map = level.map();
+    if (!map) {
+        std::fprintf(stderr, "%s: no map found\n", name.c_str());
+        return 1;
+    }
+    const auto& statics = map->chunk.statics;
+    std::vector<const Placement*> models(statics.size(), nullptr);
+    for (const Placement& placement : level.placements()) models.at(placement.instance) = &placement;
+    for (std::size_t i = 0; i < statics.size(); ++i) {
+        const StaticInstance& s = statics[i];
+        if (filtered && s.object_class() != filter) continue;
+        std::printf("#%zu class=0x%04x flags=0x%08x pos=(%.3f,%.3f,%.3f)", i, s.object_class(), s.flags,
+                    s.position[0], s.position[1], s.position[2]);
+        if (const Placement* p = models[i]) {
+            const ChunkFile& chunk = level.chunks()[p->chunk];
+            const Model& model = chunk.chunk.models[p->model];
+            std::printf(" model=%s:%zu '%s' hash=0x%08x", chunk.entry.name.c_str(), p->model,
+                        model.name.c_str(), std::uint32_t(model.hash));
+        } else {
+            std::printf(" unresolved model_index=%u hash=0x%08x", unsigned(s.model_index), std::uint32_t(s.hash));
+        }
+        for (const auto& [key, value] : s.params) std::printf(" p%d=0x%08x", key, value);
+        std::puts("");
     }
     return 0;
 }
@@ -215,7 +264,7 @@ int cmd_validate(GameFiles& gf) {
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::fprintf(stderr, "usage: %s <gamedir> files|maps|validate|collision|chars|sounds|sp|script|nav|ssh|arena|weapons|diff-acc|diff-refind|diff-combat|diff-mpweap|coder-spawn\n", argv[0]);
+        std::fprintf(stderr, "usage: %s <gamedir> files|maps|placements|validate|collision|chars|sounds|sp|script|nav|ssh|arena|weapons|diff-acc|diff-refind|diff-combat|diff-mpweap|coder-spawn\n", argv[0]);
         return 2;
     }
     try {
@@ -223,6 +272,13 @@ int main(int argc, char** argv) {
         std::string cmd = argv[2];
         if (cmd == "files") return cmd_files(gf);
         if (cmd == "maps") return cmd_maps(gf);
+        if (cmd == "placements") {
+            if (argc < 4 || argc > 5) {
+                std::fprintf(stderr, "usage: %s <gamedir> placements <level.bin> [class]\n", argv[0]);
+                return 2;
+            }
+            return cmd_placements(gf, argv[3], argc == 5 ? argv[4] : "");
+        }
         if (cmd == "validate") {
             int rc = cmd_validate(gf);
             if (validate_chars(gf, argv[1]) != 0) rc = 1;

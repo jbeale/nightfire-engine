@@ -30,6 +30,8 @@ Windows packages bundle FFmpeg 8.1 shared libraries under LGPL-3.0; license text
 
 - `build/nfdump <gamedir> files|maps|validate`: list FILES.BIN, list level maps, or parse and decode
   every map chunk file, texture, PS2 mesh and collision mesh on the disc (exit status 0 = everything decoded).
+- `build/nfdump <gamedir> placements <level.bin> [class]`: inspect authored placements, model references,
+  and parameters. The optional filter accepts a decimal or `0x`-prefixed object class.
 - `build/nfview <gamedir> [level.bin] [--coll]`: fly-through level viewer. Click to capture the mouse,
   WASD / Space / C to move, Shift for speed, K for the collision wireframe, F1-F5 toggle sky / GS blend /
   alpha test / texture animation / fog, Esc to release/quit.
