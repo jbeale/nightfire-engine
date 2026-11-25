@@ -734,6 +734,7 @@ SpResult SpSession::run_interactive() {
         s.draw_frame(interpolate_camera(previous_eye, previous_yaw, previous_pitch, p,
                                         float(accumulator / kStep)),
                      float(accumulator / kStep));
+        s.window.swap();
     }
     if (s.gamepad) SDL_CloseGamepad(s.gamepad);
     return done;
