@@ -231,6 +231,7 @@ WeaponSystem::SegmentHit WeaponSystem::trace_segment(const World& world, const V
             best.point = from + delta * h->t;
             best.normal = h->normal;
             best.victim = v.id;
+            best.target = v.target;
             best.part = part_at(best.point, v.a, v.b, v.radius);
             best.surface = 0;
         }
@@ -238,16 +239,13 @@ WeaponSystem::SegmentHit WeaponSystem::trace_segment(const World& world, const V
     return best;
 }
 
-void WeaponSystem::hurt_victim(int victim_id, const HitInfo& hit) {
-    if (victim_id >= 0 && victim_id < World::kMaxPlayers) {
+void WeaponSystem::hurt_victim(int victim_id, DamageTarget* target, const HitInfo& hit) {
+    // Multiplayer bots and humans share the same slot range. Use the victim found by the hit test.
+    if (target) {
+        if (target->alive()) target->hurt(hit);
+    } else {
         damage_player(victim_id, hit);
-        return;
     }
-    for (std::size_t i = 0; i < targets_.size(); ++i)
-        if (target_ids_[i] == victim_id) {
-            if (targets_[i]->alive()) targets_[i]->hurt(hit);
-            return;
-        }
 }
 
 // Explode_Create + Explode_Propagate: every combatant whose obj+128 lies within `radius` takes
@@ -293,7 +291,7 @@ void WeaponSystem::explode_at(const Vec3& pos, const WeaponDef& def, int attacke
         h.weapon = def.id;
         h.point = pos;
         h.part = bodypart::kNone;
-        hurt_victim(v.id, h);
+        hurt_victim(v.id, v.target, h);
     }
     // Other explosives caught in the blast (weapon ids 43, 52-55, 58) detonate: Bullet_handle_object_destruction.
     for (Projectile& o : projectiles_) {
@@ -376,7 +374,7 @@ void WeaponSystem::bullet_hit(Projectile& b, const SegmentHit& hit, const Weapon
         h.point = hit.point;
         h.direction = dir;   // HITDATA+48 (pain vector) is the normalized ray direction: the travel dir
         h.part = hit.part;
-        hurt_victim(hit.victim, h);
+        hurt_victim(hit.victim, hit.target, h);
     } else {
         const std::uint16_t snd = table_.surface(hit.surface).impact_sound;
         if (snd) sound(snd, hit.point, true);

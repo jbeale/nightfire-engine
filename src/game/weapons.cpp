@@ -1021,7 +1021,7 @@ void WeaponSystem::update_target(int slot, PlayerWeapons& p, World& world) {
     if (rules_ && rules_->teammates(slot, hit.victim)) return;
     p.target_id = hit.victim;
     p.target_valid = true;
-    p.target_kind = hit.victim < World::kMaxPlayers ? 3 : 2;
+    p.target_kind = hit.target ? 2 : 3;
 }
 
 // Player_WeaponInitBullet

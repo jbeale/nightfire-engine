@@ -255,6 +255,7 @@ private:
         Vec3 point{}, normal{};
         int surface = 0;
         int victim = -1;        // Victim::id
+        DamageTarget* target = nullptr;
         int part = bodypart::kNone;
     };
 
@@ -302,7 +303,7 @@ private:
     SegmentHit trace_segment(const World& world, const Vec3& from, const Vec3& to, int owner,
                              const std::vector<Victim>& victims, bool solid_water = false) const;
     void bullet_hit(Projectile& b, const SegmentHit& hit, const WeaponDef& def, const Vec3& dir);
-    void hurt_victim(int victim_id, const HitInfo& hit);
+    void hurt_victim(int victim_id, DamageTarget* target, const HitInfo& hit);
     void damage_player(int slot, const HitInfo& hit);
     void stun_blast(const Vec3& pos, const WeaponDef& def, int attacker, FrameTiming timing);
 
