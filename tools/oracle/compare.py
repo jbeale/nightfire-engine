@@ -45,6 +45,7 @@ def make_inputs(trace_path, out_path):
             lines.append((frame, following))
         lines.reverse()
         rate = first.get("rate", 30.0)
+        height = struct.unpack_from("<f", bytes.fromhex(first["cb"]), 0xCC)[0]
         # A frame-rate flip straddling a tracer gap is placed by motion fit: the per-frame
         # displacements into (d_old, at the previous rate) and out of (d_new, at the next rate)
         # the gap predict the far record under each candidate flip frame, and the candidate

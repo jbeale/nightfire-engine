@@ -5,6 +5,7 @@ Protocol: request = u32 total_len | (u8 opcode | args)*; reply = u32 total_len |
 import os
 import socket
 import struct
+import sys
 
 READ8, READ16, READ32, READ64 = 0, 1, 2, 3
 WRITE8, WRITE16, WRITE32, WRITE64 = 4, 5, 6, 7
@@ -21,11 +22,18 @@ class PineError(RuntimeError):
 
 
 class Pine:
-    def __init__(self, slot: int = 28011):
-        run = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
-        path = f"{run}/pcsx2.sock" if slot == 28011 else f"{run}/pcsx2.sock.{slot}"
+    def __init__(self, slot: int = 28011, *, path=None, timeout=None):
+        if path is None:
+            run = os.environ.get("TMPDIR" if sys.platform == "darwin" else "XDG_RUNTIME_DIR", "/tmp")
+            filename = "pcsx2.sock" if slot == 28011 else f"pcsx2.sock.{slot}"
+            path = os.path.join(run, filename)
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.connect(path)
+        try:
+            self.sock.settimeout(timeout)
+            self.sock.connect(os.fspath(path))
+        except OSError:
+            self.sock.close()
+            raise
 
     def close(self):
         self.sock.close()

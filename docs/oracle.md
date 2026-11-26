@@ -3,7 +3,35 @@
 The original game running in PCSX2 is the ground truth for behaviour. Tools in `tools/oracle/`
 read its memory over PINE and drive it with a virtual pad.
 
-## Setup
+## macOS capture and replay
+
+`run_comparison.py` records an on-foot level over PINE, converts the recorded pad state into native inputs,
+and runs both free and position-synced replays. It writes the reference, replay traces, logs, and `report.json`
+to a new output directory. It rejects frame gaps by default. `--max-error-cm` makes the command fail if either
+replay exceeds a specified position error.
+
+Use the US PS2 disc (`SLUS-20579`) and PCSX2 with PINE enabled. PCSX2 2.8.2 on macOS puts its PINE socket in
+`TMPDIR`. To keep test savestates and settings separate, launch PCSX2 with `-datapath` pointing to a directory
+outside the engine checkout. On macOS 2.8.2 it reads `PCSX2/inis/PCSX2.ini` beneath that directory. Under
+`[EmuCore]` set `EnablePINE = true` and choose a `PINESlot`, such as `28012`, for that profile. Configure your
+BIOS and controller in the test profile. Create a local savestate in an unpaused on-foot level once.
+
+From the engine checkout, an unattended capture can launch PCSX2 with that savestate and close its own
+instance after the trace is written. Use a profile without another running instance.
+
+```sh
+python3 tools/oracle/run_comparison.py /path/to/disc build/nfgame 07000024.bin /path/to/new-run \
+  --pcsx2 /Applications/PCSX2-v2.8.2.app/Contents/MacOS/PCSX2 \
+  --profile /path/to/test-profile --iso '/path/to/007 - Nightfire.iso' \
+  --statefile '/path/to/skyrail.p2s' --pine-slot 28012 --frames 90
+```
+
+Use `--live --pine-slot 28012` in place of the launcher options to capture keyboard or controller input in
+an already running PCSX2 session. Use `--trace /path/to/oracle.jsonl` to rerun the comparison without PCSX2.
+The unattended macOS launch records the saved scene with no injected input. The timed `--script` scenarios
+below use Linux's `uinput` bridge. Keep savestates, disc files, and generated traces outside Git.
+
+## Linux setup
 
 - PCSX2 v2.8.2 AppImage at `~/.local/opt/pcsx2/pcsx2.AppImage`, BIOS `scph10000.bin`.
 - `~/.config/PCSX2/inis/PCSX2.ini`: `[EmuCore] EnablePINE = true`, `PINESlot = 28011`;

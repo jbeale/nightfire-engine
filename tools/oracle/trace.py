@@ -30,6 +30,7 @@ import time
 from pine import Pine
 
 GAMESTATE = 0x2A3768
+LEVEL_ID = GAMESTATE + 0x0C
 DONE_COUNTER = GAMESTATE + 0x30   # ++ at the end of each logic update
 FRAME_COUNTER = GAMESTATE + 0x3C  # ++ at the start of each logic update
 GLB_PLAYERS = 0x2D88E0
@@ -66,7 +67,7 @@ def sample(pine, ptrs):
     player, bl, cb, viewer = ptrs
     ranges = [(DONE_COUNTER, 4), (FRAME_COUNTER, 4), (player, 0x100), (cb, 0xD0), (viewer, 0x100),
               (TSLOT0 + 0x120, 0x30), (PLAYER_SETTING + 0x14, 0xA0), (PLAYER_SETTING + 0x104, 0x28),
-              (FRAME_RATE, 4)]
+              (FRAME_RATE, 4), (LEVEL_ID, 4)]
     ranges += [(bl + a, n) for a, n in BL_RANGES.values()]
     ranges += [(DONE_COUNTER, 4), (FRAME_COUNTER, 4)]
     d = pine.read_ranges(ranges)
@@ -78,6 +79,7 @@ def sample(pine, ptrs):
     yaw = struct.unpack_from("<f", obj, 0x54)[0]
     rec = {
         "frame": frame0,
+        "level": struct.unpack("<I", d[9])[0],
         "pos": pos,
         "yaw": yaw,
         "rate": struct.unpack("<f", rate)[0],
@@ -88,7 +90,7 @@ def sample(pine, ptrs):
         "cb": cbd.hex(),
         "vw": vw.hex(),
     }
-    for name, chunk in zip(BL_RANGES, d[9:-2]):
+    for name, chunk in zip(BL_RANGES, d[10:-2]):
         rec[name] = chunk.hex()
     return frame0, rec
 
@@ -108,26 +110,17 @@ def read_anim(pine, ptrs):
 
 def load_script(path):
     steps = []
-    for line in open(path):
-        line = line.split("#")[0].split()
-        if line:
-            steps.append((int(line[0]), line[1:]))
+    with open(path) as source:
+        for line in source:
+            line = line.split("#")[0].split()
+            if line:
+                steps.append((int(line[0]), line[1:]))
     return sorted(steps, key=lambda s: s[0])
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("out")
-    ap.add_argument("--frames", type=int, default=150)
-    ap.add_argument("--load-slot", type=int)
-    ap.add_argument("--script")
-    ap.add_argument("--anim", action="store_true", help="also dump the animation script list per frame")
-    ap.add_argument("--timeout", type=float, default=120.0, help="wall-clock limit in seconds")
-    args = ap.parse_args()
-
-    pine = Pine()
-    steps = load_script(args.script) if args.script else []
-    vpad("release")
+def capture(pine, args, steps):
+    if pine.game_id() != "SLUS-20579":
+        raise SystemExit("Trace requires the US PS2 disc (SLUS-20579).")
     if args.load_slot is not None:
         before = pine.read32(FRAME_COUNTER)
         pine.load_state(args.load_slot)
@@ -145,9 +138,13 @@ def main():
     while time.monotonic() < deadline:
         s = sample(pine, ptrs)
         if s is None:
+            time.sleep(0.001)
             continue
         frame, rec = s
+        if args.level is not None and rec["level"] != args.level:
+            raise SystemExit(f"PCSX2 is in level {rec['level']:08x}, expected {args.level:08x}.")
         if frame == last:
+            time.sleep(0.001)
             continue
         if args.anim:
             rec["anim"] = read_anim(pine, ptrs)
@@ -155,6 +152,8 @@ def main():
                 continue   # the next update began while we read: retry on the next poll
         if first is None:
             first = frame
+        elif frame <= last:
+            raise SystemExit("PCSX2 frame counter reset during capture. Stay in the same level.")
         elif frame != last + 1:
             missed += frame - last - 1
         last = frame
@@ -164,11 +163,41 @@ def main():
             vpad(*steps.pop(0)[1])
         if rel >= args.frames:
             break
-    vpad("release")
     with open(args.out, "w") as f:
         for rec in records:
             f.write(json.dumps(rec) + "\n")
     print(f"{len(records)} frames {first}..{last}, missed {missed}, player @ {ptrs[0]:#x} -> {args.out}")
+    if first is None or last - first < args.frames:
+        raise SystemExit("Incomplete capture. Check that the emulated level is running and unpaused.")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("out")
+    ap.add_argument("--frames", type=int, default=150)
+    ap.add_argument("--pine-slot", type=int, default=28011, help="PCSX2's PINE IPC slot")
+    ap.add_argument("--pine-socket", help="override the default PINE Unix socket path")
+    ap.add_argument("--level", type=lambda value: int(value, 16), help="require this active level ID (hex)")
+    ap.add_argument("--load-slot", type=int, help="reload this PCSX2 savestate slot before recording")
+    ap.add_argument("--script", help="input script for the vpad socket bridge")
+    ap.add_argument("--anim", action="store_true", help="also dump the animation script list per frame")
+    ap.add_argument("--timeout", type=float, default=120.0, help="wall-clock limit in seconds")
+    args = ap.parse_args()
+    if args.frames < 1 or args.timeout <= 0:
+        ap.error("frames and timeout must be positive")
+
+    steps = load_script(args.script) if args.script else []
+    pine = Pine(args.pine_slot, path=args.pine_socket, timeout=5.0)
+    try:
+        if args.script:
+            vpad("release")
+        try:
+            capture(pine, args, steps)
+        finally:
+            if args.script:
+                vpad("release")
+    finally:
+        pine.close()
 
 
 if __name__ == "__main__":
