@@ -96,10 +96,8 @@ struct ExplosionHost : CutscenePlayer::Host {
     void break_near(const std::array<float, 3>&) override {}
     void set_link_byte(const std::array<float, 3>&, std::uint8_t) override {}
     void load_level(std::uint32_t) override {}
-    void sound(std::uint32_t, const std::array<float, 3>&, bool) override {}
     void set_scriptcam(std::uint32_t) override {}
     void camera_mode(std::uint32_t) override {}
-    void disable_player(bool) override {}
     void ram_save() override {}
     void text(std::uint32_t, std::uint16_t) override {}
     void fade(float) override {}
@@ -200,9 +198,11 @@ void WeaponEffects::tick_playbacks(float mul) {
             lights_.create({pb.pos[0] + l.pos[0], pb.pos[1] + l.pos[1], pb.pos[2] + l.pos[2]},
                            pb.radius * 3.0f, 255, 2, 3, 1.0f, 40, 0, l.type ? 1 : 0);
         }
-        for (const auto& s : pb.player->take_sounds())
+        for (const auto& s : pb.player->take_sounds()) {
+            if (s.action != CutscenePlayer::SoundAction::Start) continue;
             blast_sounds_.push_back({int(s.id), {pb.pos[0] + s.pos[0], pb.pos[1] + s.pos[1], pb.pos[2] + s.pos[2]},
                                      s.positional, -1, -1});
+        }
         if (!is_mp_) tick_playback_debris(pb);
         ++pb.age;
         if (!pb.player->playing() && pb.debris.empty())

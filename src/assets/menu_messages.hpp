@@ -78,7 +78,7 @@ constexpr std::uint32_t kPageBackScript = 0x63;
 constexpr std::uint32_t kOutline = 0x62;
 constexpr std::uint32_t kInputLock = 0x68;       // manager: a != 0 disables input
 constexpr std::uint32_t kBackVeto = 0x6b;        // handlers may cancel a triangle "back"
-constexpr std::uint32_t kLabelYOffset = 0x6c;
+constexpr std::uint32_t kLabelSpriteFlags = 0x6c;
 constexpr std::uint32_t kAltOnControl = 0x6d;
 constexpr std::uint32_t kFadeInPage = 0x6e;
 constexpr std::uint32_t kPageMinDelay = 0x6f;    // page: control+0xcc, frames before input is accepted

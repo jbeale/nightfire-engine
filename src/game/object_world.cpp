@@ -55,6 +55,11 @@ ObjectWorld::ObjectWorld(Level& level)
       creep_walls_(find_creep_walls(level)),
       icons_(find_icon_zones(level)) {}
 
+void ObjectWorld::enable_scenery(Level& level) {
+    constexpr std::array classes{kClassDestroyable};
+    scenery_ = CollisionWorld::of_objects(level, classes);
+}
+
 const LadderObject* ObjectWorld::ladder_at(std::size_t placement) const {
     for (const LadderObject& l : ladders_)
         if (l.placement == placement) return &l;
@@ -64,18 +69,23 @@ const LadderObject* ObjectWorld::ladder_at(std::size_t placement) const {
 void ObjectWorld::collide(const CylinderQuery& q, CylinderResult& merged, ObjectContacts& contacts) const {
     // Solid objects continue from the capsule as the cels left it, so their push adds to the cels'.
     CylinderQuery solid = q;
-    solid.a = merged.a;
-    solid.b = merged.b;
-    const CylinderResult found = solids_.cylinder(solid);
-    merged.push_out += found.push_out;
-    merged.a = found.a;
-    merged.b = found.b;
-    merged.contact |= found.contact;
-    if (!found.hits.empty()) {
-        merged.hits.insert(merged.hits.end(), found.hits.begin(), found.hits.end());
-        std::stable_sort(merged.hits.begin(), merged.hits.end(),
-                         [](const CollisionHit& x, const CollisionHit& y) { return x.dist < y.dist; });
-    }
+    const auto merge_solids = [&](const CollisionWorld& objects) {
+        solid.a = merged.a;
+        solid.b = merged.b;
+        const CylinderResult found = objects.cylinder(solid);
+        merged.push_out += found.push_out;
+        merged.a = found.a;
+        merged.b = found.b;
+        merged.contact |= found.contact;
+        if (!found.hits.empty()) {
+            merged.hits.insert(merged.hits.end(), found.hits.begin(), found.hits.end());
+            std::stable_sort(merged.hits.begin(), merged.hits.end(),
+                             [](const CollisionHit& x, const CollisionHit& y) { return x.dist < y.dist; });
+        }
+    };
+    merge_solids(solids_);
+    if (scenery_) merge_solids(*scenery_);
+    if (moving_meshes_) merge_solids(*moving_meshes_);
 
     // ThirdIcon_Update: every active zone the capsule overlaps offers its icon; the last one updated wins.
     CylinderQuery zone = solid;

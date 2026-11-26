@@ -25,7 +25,7 @@ Vec3 rotate_y(const Vec3& v, float yaw) {
 
 bool player_ok(const DroneSystem& sys, int slot) {
     const Player* p = const_cast<DroneSystem&>(sys).world().player(slot);
-    if (!p) return false;
+    if (!p || !p->enabled()) return false;
     const auto& cb = const_cast<DroneSystem&>(sys).callbacks();
     return !cb.player_alive || cb.player_alive(slot);
 }
@@ -39,7 +39,7 @@ Vec3 drone_bone_pos(const Drone& d, int bone) {
         return {d.pos[0], d.pos[1] + 0.6f, d.pos[2]};  // NDrone2_GetHeadPos: generic MP-bot body path
     if (d.character && bone >= 0 && std::size_t(bone) < d.character->skin().parent.size()) {
         const Mat4 m = d.character->bone_world(std::size_t(bone));
-        return feet + rotate_y({m[12], m[13], m[14]}, d.yaw);
+        return d.pos + rotate_y({m[12], m[13], m[14]}, d.yaw);
     }
     // No skeleton: body-relative estimate (torso mid-height, head at the top).
     const float h = bone == 5 ? 1.65f : (bone == 0x31 ? 0.4f : 1.25f);
@@ -133,8 +133,7 @@ void find_opponent(Drone& d) {
     }
     DroneSystem& sys = *d.sys;
     if (d.side != kSideFriend) {
-        if (d.side == kSideNeutral) return;   // neutral drones never target
-        // Enemy-side drones: the player (glb_players[0]), nulled when it cannot be targeted.
+        // Both neutral and enemy campaign drones watch Bond. Their states decide how to react.
         const TargetRef p = TargetRef::player(0);
         set_opponent(d, player_ok(sys, 0) ? p : TargetRef{});
         return;

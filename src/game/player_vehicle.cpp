@@ -40,6 +40,7 @@ void Player::board_vehicle(VehicleKind kind, std::uint32_t object) {
     // weapon_stowed() and restores it on leave_vehicle), and input freezes (Player_Disable(obj, 1)).
     // The vehicle-side state (its own substate, sounds, gun flags) is the Driving slice's.
     BoardedVehicle v{kind, object};
+    vehicle_return_state_ = substate;
     vehicle_ = v;
     switch (kind) {
         case VehicleKind::Car:
@@ -67,7 +68,7 @@ void Player::leave_vehicle() {
     rope_.weapon_stowed = false;
     input_frozen_ = false;
     set_cam_mode(CamMode::FirstPerson);
-    set_substate(SubState::Walk, timing_);
+    if (alive()) set_substate(vehicle_return_state_, timing_);
     jump_state = 0;
     jump_delay_ = 0;
     fall_velocity = velocity = prev_velocity_ = {};

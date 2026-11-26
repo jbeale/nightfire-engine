@@ -157,6 +157,7 @@ void WeaponSystem::spawn_projectile(const Shooter& shooter, const WeaponDef& def
     Projectile b;
     b.weapon = def.id;
     b.owner = shooter.id;
+    b.ignored_target = shooter.ignored_target;
     b.damage_scale = shooter.damage_scale;
     b.pos = shooter.origin;
     // Spec 7.3 (Bullet_init): shots = trunc(min(fired_in_cycle, clipSize) * growth); the draw order is
@@ -178,7 +179,7 @@ void WeaponSystem::spawn_projectile(const Shooter& shooter, const WeaponDef& def
     projectiles_.push_back(b);
 }
 
-void WeaponSystem::fire(const Shooter& shooter, int weapon_id) {
+void WeaponSystem::fire(const Shooter& shooter, int weapon_id, int sound_override) {
     if (weapon_id <= 0 || weapon_id >= WeaponTable::kWeaponCount) return;
     const WeaponDef& def = table_.weapon(weapon_id);
     if (def.pellets == 0) {
@@ -190,8 +191,10 @@ void WeaponSystem::fire(const Shooter& shooter, int weapon_id) {
         return;
     }
     for (int i = 0; i < def.pellets; ++i) spawn_projectile(shooter, def);
-    if (def.fire_sound)
-        sound(int(def.fire_sound), shooter.origin, true, -1, shooter.id >= 0 && shooter.id < World::kMaxPlayers ? shooter.id : -1);
+    const int effect = sound_override ? sound_override : int(def.fire_sound);
+    // A caller supplying a positional effect (such as a remote vehicle) has no separate first-person gun sound.
+    const int exclude = sound_override == 0 && shooter.id >= 0 && shooter.id < World::kMaxPlayers ? shooter.id : -1;
+    if (effect) sound(effect, shooter.origin, true, -1, exclude);
 }
 
 void WeaponSystem::explode(const Vec3& position, int weapon_id, int attacker) {
@@ -203,7 +206,7 @@ void WeaponSystem::explode(const Vec3& position, int weapon_id, int attacker) {
 
 WeaponSystem::SegmentHit WeaponSystem::trace_segment(const World& world, const Vec3& from, const Vec3& to, int owner,
                                                      const std::vector<Victim>& victims,
-                                                     bool solid_water) const {
+                                                     bool solid_water, int ignored_target) const {
     SegmentHit best;
     const Vec3 delta = to - from;
     const float len = length(delta);
@@ -214,15 +217,25 @@ WeaponSystem::SegmentHit WeaponSystem::trace_segment(const World& world, const V
     // class 0x10 is likewise filtered (mask bit 0x2) unless F2 & 0x800 (mask 520: water stays solid).
     unsigned pick = pick::kIgnoreGhost | pick::kIgnoreMaterial10;
     if (solid_water) pick &= ~pick::kIgnoreMaterial10;   // mask 520: no F2&0x800 row exists in the table
-    if (auto h = world.collision().ray(from, to, pick)) {
+    const auto apply_surface = [&](const CollisionHit& h) {
         best.world = true;
-        best.t = std::min(1.0f, h->dist / len);
-        best.point = h->point;
-        best.normal = h->normal;
-        best.surface = h->material & 0x3F;
+        best.t = std::min(1.0f, h.dist / len);
+        best.point = h.point;
+        best.normal = h.normal;
+        best.surface = h.material & 0x3F;
+    };
+    if (auto h = world.collision().ray(from, to, pick)) apply_surface(*h);
+    if (const auto* moving = world.objects().moving_meshes()) {
+        if (auto h = moving->ray(from, to, pick); h && (!best.world || h->dist < best.t * len)) apply_surface(*h);
+    }
+    if (const auto* scenery = world.objects().scenery()) {
+        if (auto h = scenery->ray(from, to, pick); h && (!best.world || h->dist < best.t * len)) {
+            apply_surface(*h);
+            best.scenery = h->placement;
+        }
     }
     for (const Victim& v : victims) {
-        if (v.id == owner) continue;
+        if (v.id == owner || v.id == ignored_target) continue;
         if (auto h = ray_capsule(from, delta, v.a, v.b, v.radius)) {
             if (h->t > 1.0f) continue;
             if ((best.world || best.victim >= 0) && h->t >= best.t) continue;
@@ -234,6 +247,7 @@ WeaponSystem::SegmentHit WeaponSystem::trace_segment(const World& world, const V
             best.target = v.target;
             best.part = part_at(best.point, v.a, v.b, v.radius);
             best.surface = 0;
+            best.scenery = SIZE_MAX;
         }
     }
     return best;
@@ -293,6 +307,7 @@ void WeaponSystem::explode_at(const Vec3& pos, const WeaponDef& def, int attacke
         h.part = bodypart::kNone;
         hurt_victim(v.id, v.target, h);
     }
+    if (scenery_blast_) scenery_blast_(pos, def.blast_radius, def.damage * scale, attacker);
     // Other explosives caught in the blast (weapon ids 43, 52-55, 58) detonate: Bullet_handle_object_destruction.
     for (Projectile& o : projectiles_) {
         if (o.delete_me || !(o.weapon == 43 || (o.weapon >= 52 && o.weapon <= 55) || o.weapon == 58)) continue;
@@ -352,11 +367,6 @@ void WeaponSystem::stun_blast(const Vec3& pos, const WeaponDef& def, int attacke
 // Bullet_CollisionHandler for one hit.
 void WeaponSystem::bullet_hit(Projectile& b, const SegmentHit& hit, const WeaponDef& def, const Vec3& dir) {
     const bool on_body = !hit.world;
-    if (!on_body && (def.flags3 & wf3::kGrapple) != 0 && b.owner >= 0 && b.owner < World::kMaxPlayers && world_) {
-        // Grapple hook caught (Bullet_Delete on a type-81 'Q' object -> Player_SetGrapplePoint). Our world
-        // hit-test has no object classes, so any solid world hit counts [INFERENCE].
-        if (Player* pl = world_->player(b.owner); pl && pl->alive()) pl->begin_grapple(hit.point);
-    }
     // (Taser validity is decided pre-spawn in init_bullet now; a world hit here only happens when the victim
     // moved away mid-flight, so the round stays spent.)
     events_.impacts.push_back({hit.point, hit.normal, hit.surface, def.id, on_body, b.owner});
@@ -484,9 +494,19 @@ bool WeaponSystem::step_projectile(Projectile& b, World& world, FrameTiming timi
     if (step <= 0.0f) return b.travelled <= def.range;
     const Vec3 to = b.pos + b.dir * step;
     const SegmentHit hit =
-        trace_segment(world, b.pos, to, b.owner, victims, (def.flags2 & wf2::kSolidWater) != 0);
+        trace_segment(world, b.pos, to, b.owner, victims, (def.flags2 & wf2::kSolidWater) != 0, b.ignored_target);
+    if ((def.flags3 & wf3::kGrapple) != 0 && b.owner >= 0 && b.owner < World::kMaxPlayers) {
+        if (const auto hook = world.rope_world().grapple_ray(b.pos, to);
+            hook && ((!hit.world && hit.victim < 0) || length(hook->point - b.pos) <= hit.t * step + 0.1f)) {
+            if (Player* player = world.player(b.owner); player && player->alive())
+                player->begin_grapple(hook->point);
+            return false;
+        }
+    }
     if (hit.world || hit.victim >= 0) {
         bullet_hit(b, hit, def, b.dir);
+        if (hit.scenery != SIZE_MAX && scenery_hit_)
+            scenery_hit_(hit.scenery, def.damage * b.damage_scale, def.class_flags, b.owner);
         return !b.delete_me;
     }
     b.pos = to;

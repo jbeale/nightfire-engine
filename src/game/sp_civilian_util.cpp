@@ -105,32 +105,42 @@ bool cover_usable(Drone& d, std::size_t index) {
     return true;
 }
 
+namespace {
+
+int nearby_cover(Drone& d) {
+    const auto& nodes = sp_of(d).level().cover_nodes;
+    const Vec3 feet = d.feet();
+    const Vec3 opponent = target_pos(*d.sys, d.opponent);
+    // Cheap distance bounds before trying to route. Both the approach and the space from the
+    // opponent matter; a node beside Bond or beyond him often stalls the close-quarters exchange.
+    float best_distance = std::min(d.opp_dist, 25.0f);
+    int best = -1;
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+        const Vec3 point = nodes[i].pos;
+        const Vec3 approach = point - feet;
+        const float distance = length(approach);
+        if (distance > best_distance || length(point - opponent) < d.min_cover_dist || !cover_usable(d, i)) continue;
+        best_distance = distance;
+        best = int(i);
+    }
+    return best;
+}
+
+}  // namespace
+
 bool cover_available(Drone& d) {
-    // NDrone2_CoverAvailable: needs an opponent and free cover (Drone+0x4f8 & 0x1000 not set).
-    if (!d.opponent.valid()) return false;
-    if (d.flags & flag::kCoverClaimed) return false;
-    const SpLevel& level = sp_of(d).level();
-    for (std::size_t i = 0; i < level.cover_nodes.size(); ++i)
-        if (cover_usable(d, i)) return true;
-    return false;
+    // NDrone2_CoverAvailable 0x155a38: a drone already in cover can use it. A unit
+    // facing an opponent inside four metres fights in place instead of seeking a new node.
+    if (!d.has_beh(beh::kFindCover) || !d.opponent.valid()) return false;
+    if (d.flags & flag::kCoverClaimed) return true;
+    if ((d.sight_flags & sight::kSeen) && d.opp_dist < 4.0f) return false;
+    return nearby_cover(d) >= 0;
 }
 
 bool find_cover(Drone& d) {
     SpExt& e = sx(d);
     const SpLevel& level = sp_of(d).level();
-    const Vec3 f = d.feet();
-    int best = -1;
-    float best_d2 = 1e18f;
-    for (std::size_t i = 0; i < level.cover_nodes.size(); ++i) {
-        if (!cover_usable(d, i)) continue;
-        const Vec3& p = level.cover_nodes[i].pos;
-        const float dx = f[0] - p[0], dz = f[2] - p[2];
-        const float d2 = dx * dx + dz * dz;
-        if (d2 < best_d2) {
-            best_d2 = d2;
-            best = int(i);
-        }
-    }
+    const int best = (d.flags & flag::kCoverClaimed) && e.cover_node >= 0 ? e.cover_node : nearby_cover(d);
     if (best < 0) return false;
     e.cover_node = best;
     d.flags |= flag::kCoverClaimed;

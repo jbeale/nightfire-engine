@@ -53,6 +53,8 @@ struct ArenaSettings {
     std::int32_t score_limit = 10;             // +0x19C frags / points / lives, -1 unlimited
     float time_limit = 600.0f;                  // seconds (+0x1A0 after P_MPCONFIRM), <= 0 disables the match timer
     bool friendly_fire = false;                 // +0x198
+    bool explosive_scenery = false;             // +0x1D4
+    int mini_vehicles = 0;                      // +0x1CC, 0 = off, 1 = tanks
     int weapon_set = 0;                         // +0x1B4 PickupMatrix row 0..10
     SpawnSelection spawn_selection = SpawnSelection::Random;   // +0x1C0
     bool grapple = false;                       // +0x1D0

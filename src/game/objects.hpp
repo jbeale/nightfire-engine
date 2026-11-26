@@ -152,6 +152,7 @@ public:
         float height = 1.0f;
         bool is_player = true;
         int slot = -1;  // player slot for use-presses and hurt, -1 = drone
+        std::optional<CylinderQuery> capsule;
     };
     // `hurt(slot, damage, type, from)`: damage sink (players), null = ignore.
     using HurtSink = std::function<void(int, float, DamageType, const std::array<float, 3>&)>;
@@ -194,6 +195,9 @@ public:
         float angle = 0;
     };
     const std::vector<DrawOverride>& draws() const { return draws_; }
+    unsigned take_bond_pickups() { const auto count = bond_pickups_; bond_pickups_ = 0; return count; }
+    std::optional<Vec3> update_searchlights(const std::vector<Toucher>& touchers, const CollisionWorld& world,
+                                           float frames);
     // Placements the static draw pass must skip this frame (taken over by draws_).
     const std::vector<std::size_t>& hides() const { return hides_; }
     const std::vector<ThirdCamAnchor>& thirdcams() const { return thirdcams_; }
@@ -223,6 +227,7 @@ public:
     void door_pose(DoorObject& d, std::array<float, 16>& out) const;
     // LoadLevel/MoviePlayer requests (level id / script hash, 0 = none).
     std::uint32_t take_load_level();
+    std::uint16_t exit_channel() const { return exit_channel_; }
     std::uint32_t take_movie();
 
     // Validation: per-class placement counts + issues (unknown classes, dangling params).
@@ -248,13 +253,11 @@ private:
         float range = 20.0f;      // param 2 (`+64`)
         float half_sin = 0.10f;   // param 1 (`+60 = sin(p1 * 0.5 deg)` [INFERENCE])
         bool tripped = false;
-        // Searchlight sweep (`Searchlight_Update` case 0): yaw/pitch pan around the base
-        // angles with the param 4/5 degree range. Only class 222 sweeps (`sweep`).
-        bool sweep = false;
-        float phase = 0;      // `+4`: advances 1.0 per tick (init `Rand(480)` in the original)
-        float amp = 0;        // `+56`: half-range in radians
-        float base_yaw = 0;   // `+60`: range center in radians
-        float base_pitch = 0;  // `+20`: pitch center (placement pitch; original source unknown)
+    };
+    struct Searchlight {
+        std::size_t head = 0, beam = SIZE_MAX, pool = SIZE_MAX;
+        std::uint16_t on = 0, off = 0, alarm = 0;
+        float phase = 0, yaw = 0, pitch = 0, amp = 0, base_yaw = 0, base_pitch = 0, hold = 0;
     };
     struct Turret {
         std::size_t placement = 0;
@@ -280,8 +283,9 @@ private:
     };
     struct PickupObj {
         std::size_t placement = 0;
-        std::uint16_t kind = 0;  // param 44: weapon/ammo/armour/health selector
+        std::uint16_t kind = 0;  // param 0: weapon, ammo, key, armour, objective, health, 007 token
         std::uint32_t arg0 = 0, arg1 = 0;
+        std::uint16_t channel = 0;
         std::uint32_t sound = 245;  // pickup jingle (param 4, 0xFFFF = default)
         std::uint32_t respawn = 0;  // frames until it comes back (param 6, 0 = never)
         float respawn_in = 0;
@@ -310,6 +314,8 @@ private:
     std::vector<DoorObject> doors_;
     std::vector<Breakable> breakables_;
     std::vector<Sensor> sensors_;
+    std::vector<Searchlight> searchlights_;
+    std::vector<bool> trigger_meshes_;
     std::vector<Turret> turrets_;
     std::vector<Volume> volumes_;
     std::vector<Switch> switches_;
@@ -336,6 +342,8 @@ private:
     };
     std::unordered_map<std::size_t, ScriptSolid> script_solids_;
     std::uint32_t load_level_ = 0, movie_ = 0;
+    std::uint16_t exit_channel_ = 0;
+    unsigned bond_pickups_ = 0;
     std::array<std::uint8_t, 256> prev_{};  // channel snapshot for rising edges
     std::uint64_t tick_ = 0;
 

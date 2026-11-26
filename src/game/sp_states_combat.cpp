@@ -73,7 +73,7 @@ int first_sight_state(Drone& d) {
             return kStInterogate;
         }
     }
-    talk(d, Speech::Other);   // NDrone2_SeenPlayerTalk
+    talk(d, Speech::SeenPlayer);
     if (d.has_beh(beh::kChallengeNear)) {
         if (d.sys->rand_int(2) == 0) return 0;
         return choose_combat_move(d);
@@ -89,19 +89,15 @@ int first_sight_state(Drone& d) {
 // draws weapon 6 (DroneWeap_ChangeWeapon); the truly unarmed cower.
 int attack_no_weapon(Drone& d) {
     if (d.weapon > 1) return 0;
-    if (sx(d).spec.variant > 1) return kStDrawWeapon;
+    if (sx(d).cfg.variant > 1) return kStDrawWeapon;
     return kStCivilianScared;
 }
 
 // Shared FirstAttack bookkeeping: alt mode cleared, reacted + first-attack flags, first-attack time,
 // full alertness, widened tower sight.
 void mark_reacted(Drone& d) {
-    d.alt_dmode = 0;
-    d.flags |= flag::kFirstAttackDone;
+    set_as_attacking(d);
     d.alt_channel_snapshot = false;
-    if (d.first_attack_time == 0) d.first_attack_time = d.now();
-    d.flags |= flag::kAlertedByNoise;
-    d.alertness = 1.0f;
 }
 
 // ---- DroneFunc_FirstAttack 0x148010 -----------------------------------------------------------------------------------------
@@ -111,9 +107,9 @@ void mark_reacted(Drone& d) {
 int first_attack(Drone& d) {
     if (d.flags & flag::kFirstAttackDone) return 0;
     if (d.sys->config().blind_drones) return 0;   // switch_BLIND_DRONES
-    const std::uint32_t lvl = d.sys->config().level_id;
+    const bool second_behaviour = d.alt_dmode == 100;
     if (!(d.flags & flag::kSawPlayer)) {
-        if (d.alert_flags & 0x70000000) {
+        if (d.flags & (flag::kShoutSource | flag::kNoiseSource | flag::kDroneAlertSource)) {
             if (const int s = first_alert_state(d); s != 0) return s;
         }
         mark_reacted(d);
@@ -124,11 +120,8 @@ int first_attack(Drone& d) {
         }
         mark_reacted(d);
     }
-    if (lvl != 0x7000009 && lvl != 0x700000a) {   // tower snipers keep their long sight
-        if (d.sight_range < d.max_combat_dist) d.sight_range = d.max_combat_dist;
-        d.sight_cone = 0.0f;
-    }
     if (d.side == kSideEnemy && !(d.flags & flag::kFirstSightShoutSent) && d.opponent.valid()) {
+        d.alert_flags |= 0x10;
         alert_others(d, kMsgShoutAttack, d.opponent, d.alert_pos);   // first-attack attack shout
         d.flags |= flag::kFirstSightShoutSent;
     }
@@ -137,11 +130,15 @@ int first_attack(Drone& d) {
     if (d.alt_state == 0 || d.alt_channel_snapshot) return attack_no_weapon(d);
     d.initial_state = kStAttack;
     if (d.dtype_alt != 0) d.dtype = d.dtype_alt;
+    int next = d.alt_state;
+    if (d.dtype == kDtypeSniper) {
+        d.dtype = kDtypeSniperAlert;
+        next = kStAttack;
+    }
     d.dtype_alt = 0;
     d.alt_state = 0;
-    if (d.alt_dmode == 100) d.active_behaviour = 1;   // DroneFunc_Set2ndBehaviour
-    const int alt = d.alt_state;
-    return alt != 0 && alt != 0xb4 ? alt : kStAttack;
+    if (second_behaviour) d.active_behaviour = 1;   // DroneFunc_Set2ndBehaviour
+    return next != 0xb4 ? next : kStAttack;
 }
 
 // ---- Attack 0x56 (0x164210): ENTER-only dispatcher ----------------------------------------------------------------------------
@@ -151,7 +148,6 @@ int state_attack(Drone& d, const Msg& m) {
     case kMsgNone:
         return 1;
     case kMsgEnter: {
-        set_as_attacking(d);   // DroneFunc_SetAsAttacking 0x147d70: alt mode cleared, widened sight
         const int first = first_attack(d);
         if (first != 0) {
             d.set_state(first);
@@ -163,8 +159,9 @@ int state_attack(Drone& d, const Msg& m) {
             d.set_state(nw);
             return 1;
         }
+        d.flags |= flag::kDeaf;
         if (d.dtype != kDtypeSniper && d.dtype != kDtypeSniperAlert) {
-            d.flags |= flag::kFirstSightShoutSent | flag::kAware;
+            d.flags |= flag::kAware;
             invalidate_attack_route(d);
             if (!d.has_beh(beh::kAimStandPreferred) || d.engage_dist <= d.opp_dist) {
                 d.set_state(kStCombat);
@@ -260,23 +257,18 @@ int state_combat_out_of_range(Drone& d, const Msg& m) {
     }
 }
 
-// ---- CombatNewSighting 0x5b: aim pause on regained sight ---------------------------------------
+// ---- CombatNewSighting 0x5b: choose a firing stance on regained sight --------------------------
 int state_combat_new_sighting(Drone& d, const Msg& m) {
     switch (m.id) {
     case kMsgNone:
         return 1;
-    case kMsgEnter:
+    case kMsgEnter: {
         d.flags |= flag::kAware;
-        set_angle_to_obj(d, d.opponent, 0.0f, true);
-        anim_call(d, 0, kAimStand);
-        d.timer1 = {d.now() + d.seconds(0.5f), 0};
+        talk(d, Speech::SeenPlayer);
+        const bool crouch = can_aim_crouch(d) && d.sys->rand_int(2) != 0;
+        d.set_state(crouch ? kStAimCrouchFire : kStAimStandFire);
         return 1;
-    case kMsgTimer1:
-        d.set_state(kStCombat);
-        return 1;
-    case kMsgTick:
-        aim_flag(d, kAimStand);
-        return 1;
+    }
     default:
         return skeleton(d, m);
     }
@@ -380,11 +372,25 @@ int state_draw_weapon(Drone& d, const Msg& m) {
     case kMsgNone:
         return 1;
     case kMsgEnter:
+        if (sx(d).cfg.variant <= 1) {
+            d.set_state(kStCivilianScared);
+            return 1;
+        }
         d.flags |= flag::kAware;   // NDrone2_DSTATE_DrawWeapon: armed drones perceive from here on
-        d.weapon = 6;   // DroneWeap_ChangeWeapon(6): fit the standard gun (kind goes above 1)
-        anim_call(d, 0, kDraw, 0, kStAttack);   // end state resumes the fight
+        d.set_alert_status(AlertStatus::Alert);
+        anim_call(d, 0, kDraw, 0, d.initial_state);
+        return 1;
+    case kMsgLeave:
+        if (d.weapon <= 1 && sx(d).cfg.variant > 1) {
+            // ACTION.ELF 0x17a738: changing to the P2K sets the pistol anim class and a 16-round clip.
+            d.weapon = 6;
+            d.sub_class = 4;
+            sx(d).ammo = sx(d).ammo_max = 16;
+        }
         return 1;
     case kMsgTick:
+        sp_of(d).note_attacker(d);
+        set_angle_to_obj(d, d.opponent, 0.0f);
         return 1;
     default:
         return skeleton(d, m);
@@ -406,13 +412,19 @@ int state_aim_stand(Drone& d, const Msg& m) {
         return 1;
     case kMsgEnter:
         d.flags |= flag::kAware;
-        return aim_enter(d, kAimStand);
-    case kMsgTick:
-        aim_flag(d, kAimStand);
-        if (d.burst_done) {
-            d.burst_done = false;
-            d.set_state(kStCombat);
+        if (d.weapon <= 1) {
+            d.set_state(kStDrawWeapon);
+            return 1;
         }
+        d.fire_requested = false;
+        set_angle_to_obj(d, d.opponent, 0.0f, true);
+        anim_call(d, 0, kAimStand, 0, 0, kMsgAnimResume);
+        return 1;
+    case kMsgTick:
+        sp_of(d).note_attacker(d);
+        return 1;
+    case kMsgAnimResume:
+        d.set_state(d.lost_frames < d.seconds(16.0f / 60.0f) ? kStAimStandFire : kStCombatNoSight);
         return 1;
     default:
         return skeleton(d, m);
@@ -441,7 +453,7 @@ int state_aim_stand_reload(Drone& d, const Msg& m) {
     case kMsgNone:
         return 1;
     case kMsgEnter:
-        anim_call(d, 0, kReload, 0, kStCombat);
+        anim_call(d, 0, kReload, 0, 0, kMsgAnimResume);
         return 1;
     case kMsgAnimResume: {
         SpExt& e = sx(d);   // Drone+0xbbc clip refill

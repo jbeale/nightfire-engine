@@ -27,6 +27,7 @@ struct Projectile {
     float age = 0;               // ticks alive (for renderers)
     Vec3 previous_pos{};         // visual-only pose from the preceding logic tick
     std::uint16_t network_id = 0; // snapshot identity for render interpolation
+    int ignored_target = -1;      // weapon's platform, separate from the player credited with the shot
 };
 
 // Ray (from + t * delta, t in [0, 1]) against the capsule axis a..b swept by `radius`.

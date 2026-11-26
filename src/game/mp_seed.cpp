@@ -356,6 +356,8 @@ void MpSeedImporter::configure(MatchLaunch& launch) const {
     if (spawn < 0 || spawn > 2) throw std::runtime_error("MP seed: invalid spawn selection");
     o.spawn = SpawnSelection(spawn);
     o.grapple = u32_at(mps, 0x50) != 0;
+    o.explosive_scenery = u32_at(mps, 0x54) != 0;
+    o.mini_vehicles = int(u32_at(mps, 0x4c));
     o.radar_names = u32_at(mps, 0x44) != 0;
     o.rng_override = true;
     o.rng_x = uint_number(index(seed.at("rng_words"), 0));

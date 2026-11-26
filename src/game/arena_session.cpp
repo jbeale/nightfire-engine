@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <set>
 #include <stdexcept>
 
 namespace nf {
@@ -56,6 +57,13 @@ bool MatchOptions::parse(const std::vector<std::string>& args, std::size_t& i) {
         time_limit = float(std::atof(value().c_str())) * 60.0f;
     } else if (a == "--friendly-fire") {
         friendly_fire = true;
+    } else if (a == "--explosive-scenery") {
+        explosive_scenery = true;
+    } else if (a == "--mini-vehicles") {
+        const auto& mode = value();
+        if (mode == "off") mini_vehicles = 0;
+        else if (mode == "tanks") mini_vehicles = 1;
+        else throw std::runtime_error("--mini-vehicles expects off|tanks");
     } else if (a == "--weapons") {
         weapon_set = std::clamp(std::atoi(value().c_str()), 0, 10);
     } else if (a == "--spawn") {
@@ -92,6 +100,8 @@ ArenaSettings MatchOptions::settings() const {
     s.friendly_fire = friendly_fire;
     s.weapon_set = weapon_set;
     s.grapple = grapple;
+    s.explosive_scenery = explosive_scenery;
+    s.mini_vehicles = mini_vehicles;
     s.radar_names = radar_names;
     const bool teams = (mode & mp_mode::kTeamFlag) != 0;
     int n = 0;
@@ -188,9 +198,19 @@ ArenaSession::ArenaSession(World& world, WeaponTable table, const MatchOptions& 
 
     // MP_Start: humans are created one after the other, so each spawn avoids the ones before it.
     const ArenaSettings& settings = arena_->settings();
+    load_scenery(settings.explosive_scenery);
+    auto cars = std::make_unique<SkyrailCableCars>(world_);
+    cable_cars_ = cars.get();
+    scenery_hides_.insert(scenery_hides_.end(), cars->static_markers().begin(), cars->static_markers().end());
+    world_.add_system(std::move(cars));
+    auto tanks = std::make_unique<MiniTanks>(world_, *weapons_, settings.mini_vehicles == 1);
+    mini_tanks_ = tanks.get();
+    scenery_hides_.insert(scenery_hides_.end(), tanks->static_markers().begin(), tanks->static_markers().end());
+    world_.add_system(std::move(tanks));
     for (int i = 0; i < options.humans; ++i) {
         const ArenaSpawn at = arena_->spawn_point(settings.slots[std::size_t(i)].team, i);
-        world_.spawn_player(i, SpawnPoint{SpawnPoint::Kind::Multiplayer, at.pos, at.yaw, {}});
+        Player& player = world_.spawn_player(i, SpawnPoint{SpawnPoint::Kind::Multiplayer, at.pos, at.yaw, {}});
+        mini_tanks_->bind_player(i, player);
         SpawnLoadout l;
         l.health = 100.0f + float(settings.slots[std::size_t(i)].health_bonus);
         l.start_weapon = arena_->weapon_set_row()[0];
@@ -322,6 +342,94 @@ void ArenaSession::tick(const PadInputs& pads, FrameTiming timing) {
             for (const ScoreRow& row : r.ranking) std::printf("          %-10s score %d kills %d deaths %d\n", row.name.c_str(), row.score, row.kills, row.deaths);
         }
     }
+}
+
+void ArenaSession::load_scenery(bool enabled) {
+    Level& level = world_.level();
+    if (!level.map()) return;
+    const auto& placements = level.placements();
+    const auto& statics = level.map()->chunk.statics;
+    std::set<std::pair<std::size_t, std::size_t>> wreck_models;
+    for (std::size_t i = 0; i < placements.size(); ++i) {
+        const Placement& p = placements[i];
+        const StaticInstance& inst = statics[p.instance];
+        if (inst.object_class() != kClassDestroyable) continue;
+        const Model& model = level.chunks()[p.chunk].chunk.models[p.model];
+        std::optional<std::size_t> wreck;
+        if (model.linked_lod >= 0) {
+            wreck = std::size_t(model.linked_lod);
+            wreck_models.emplace(p.chunk, *wreck);
+        }
+        if (!enabled) {
+            scenery_hides_.push_back(i);
+            continue;
+        }
+        const Vec3 center = transform_point(p.transform, {model.params[0], model.params[1], model.params[2]});
+        const float scale = std::max({length({p.transform[0], p.transform[1], p.transform[2]}),
+                                      length({p.transform[4], p.transform[5], p.transform[6]}),
+                                      length({p.transform[8], p.transform[9], p.transform[10]})});
+        const auto allowed = inst.param(4);
+        const auto filter = allowed == 0 ? std::uint16_t(0) : std::uint16_t(~allowed);
+        scenery_.emplace(i, SceneryProp{float(inst.param(3)), center, model.params[3] * scale, wreck, filter});
+    }
+    for (std::size_t i = 0; i < placements.size(); ++i) {
+        const Placement& p = placements[i];
+        // The disabled wreck placements are references. Destroy_Smash supplies the live wreck.
+        if ((statics[p.instance].flags & 0x2000) && wreck_models.contains({p.chunk, p.model}))
+            scenery_hides_.push_back(i);
+    }
+    if (scenery_.empty()) return;
+    world_.objects().enable_scenery(level);
+    weapons_->set_scenery_callbacks(
+        [this](std::size_t i, float damage, std::uint16_t weapon_class, int attacker) {
+            hit_scenery(i, damage, weapon_class, attacker);
+        },
+        [this](const Vec3& center, float radius, float damage, int attacker) {
+            blast_scenery(center, radius, damage, attacker);
+        });
+}
+
+void ArenaSession::hit_scenery(std::size_t i, float damage, std::uint16_t weapon_class, int attacker) {
+    const auto found = scenery_.find(i);
+    if (found == scenery_.end() || damage <= 0.0f || (found->second.hit_filter & weapon_class)) return;
+    found->second.health -= damage;
+    if (found->second.health < 0.0f) smash_scenery(i, attacker);
+}
+
+void ArenaSession::blast_scenery(const Vec3& center, float radius, float damage, int attacker) {
+    // Explode_Propagate calls Destroy_Smash at one point of blast damage, irrespective of the prop's health.
+    if (damage < 1.0f) return;
+    std::vector<std::size_t> caught;
+    for (const auto& [i, prop] : scenery_) {
+        if (prop.hit_filter & 0x20) continue;
+        const float distance = std::max(0.0f, length(prop.center - center) - prop.radius);
+        if (damage * (1.0f - distance / radius) >= 1.0f) caught.push_back(i);
+    }
+    for (auto i : caught) smash_scenery(i, attacker);
+}
+
+void ArenaSession::smash_scenery(std::size_t i, int attacker) {
+    const auto found = scenery_.find(i);
+    if (found == scenery_.end()) return;   // a preceding blast in the chain may have smashed it already
+    const SceneryProp prop = found->second;
+    scenery_.erase(found);
+    Level& level = world_.level();
+    Placement p = level.placements()[i];
+    const StaticInstance& inst = level.map()->chunk.statics[p.instance];
+    if (prop.wreck) {
+        scenery_hides_.push_back(i);
+        p.model = *prop.wreck;
+        scenery_wrecks_.push_back(p);
+        world_.objects().scenery()->set_object_model(level, i, p.model);
+    }
+
+    const auto kind = std::int8_t(inst.param(2));
+    if (kind == 0) return;
+    const auto script = kind == 1 ? 0x06000027u : kind == 2 ? 0x0600004Fu : 0x06000052u;
+    WeaponDef blast{};
+    blast.blast_radius = float(inst.param(5)) * 0.01f;
+    blast.damage = float(kind) * 10.0f;
+    weapons_->explode_at(prop.center, blast, attacker, 1.0f, script);
 }
 
 ArenaHud ArenaSession::hud(int slot) const {

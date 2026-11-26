@@ -2,6 +2,7 @@
 
 #include <array>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -10,6 +11,8 @@
 #include "assets/strings.hpp"
 #include "assets/weapon_data.hpp"
 #include "game/arena.hpp"
+#include "game/mini_tanks.hpp"
+#include "game/skyrail_cable_cars.hpp"
 #include "game/weapons.hpp"
 
 namespace nf {
@@ -25,6 +28,8 @@ struct MatchOptions {
     std::int32_t score_limit = 10;              // --frag-limit N (-1 unlimited)
     float time_limit = 600.0f;                  // --time-limit MINUTES (<= 0 disables the match timer)
     bool friendly_fire = false;                 // --friendly-fire
+    bool explosive_scenery = false;            // --explosive-scenery
+    int mini_vehicles = 0;                     // --mini-vehicles off|tanks
     int weapon_set = 0;                         // --weapons 0..10
     SpawnSelection spawn = SpawnSelection::Random;   // --spawn near|far|random
     int handicap = 0;                           // --handicap N: health bonus of every human (100 + N)
@@ -86,6 +91,10 @@ public:
 
     // HUD data of viewer `slot` from its player's eye.
     ArenaHud hud(int slot) const;
+    const std::vector<std::size_t>& scenery_hides() const { return scenery_hides_; }
+    const std::vector<Placement>& scenery_wrecks() const { return scenery_wrecks_; }
+    const std::vector<Placement>& cable_cars() const { return cable_cars_->poses(); }
+    const MiniTanks& mini_tanks() const { return *mini_tanks_; }
 
     // Messages / sounds of the last tick, as the front end would show or play them.
     std::vector<MatchMessage>& messages() { return messages_; }
@@ -100,12 +109,28 @@ private:
     unsigned sleeve_for_character(int character) const;
     WeaponSystem* weapons_ = nullptr;
     ArenaSystem* arena_ = nullptr;
+    SkyrailCableCars* cable_cars_ = nullptr;
+    MiniTanks* mini_tanks_ = nullptr;
     std::array<std::unique_ptr<HumanBody>, kMpSlots> bodies_{};
     std::vector<MatchMessage> messages_;
     std::vector<MatchSound> sounds_;
     MatchPhase last_phase_ = MatchPhase::Running;
     std::vector<int> last_dead_;
     std::vector<int> last_score_;
+    struct SceneryProp {
+        float health;
+        Vec3 center;
+        float radius;
+        std::optional<std::size_t> wreck;
+        std::uint16_t hit_filter;
+    };
+    void load_scenery(bool enabled);
+    void hit_scenery(std::size_t placement, float damage, std::uint16_t weapon_class, int attacker);
+    void blast_scenery(const Vec3& center, float radius, float damage, int attacker);
+    void smash_scenery(std::size_t placement, int attacker);
+    std::map<std::size_t, SceneryProp> scenery_;
+    std::vector<std::size_t> scenery_hides_;
+    std::vector<Placement> scenery_wrecks_;
 };
 
 }  // namespace nf

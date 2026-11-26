@@ -385,9 +385,11 @@ game executable while bypassing boot/movie navigation. Use `--page` only to insp
 multiplayer pages should be reached from their parent page so `MpSetup` is populated. Smoke-captured
 `P_MPSCENARIO` with `--page 0x4000001a --press wait20`.
 
+The pause and end-mission pages share the additive silhouette `0x030000db`. Its 348 frames come from the
+level's type-16 mask stream and source texture `0x030000da`. During pause, the last gameplay view stays behind the panel.
+
 Known gaps: the `P_CNCONTROLS` per-style button diagram keeps the script's `"1"` placeholders (filling it needs
-`Menu_DisplayControllerStyle`'s label map behind an unrecovered jumptable); the `P_ENDMISSION` portrait sprite
-`0x030000db` decodes garbled (needs a sprites-side look); `TWEAKS` tuning values and the `C_NIS` list stay
+`Menu_DisplayControllerStyle`'s label map behind an unrecovered jumptable); `TWEAKS` tuning values and the `C_NIS` list stay
 script-side (live game globals / raw script pointers).
 
 ## Original art, Settings screen, Extended HUD and accessibility

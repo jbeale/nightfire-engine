@@ -16,6 +16,25 @@ int skeleton(Drone& d, const Msg& m) { return skel_common(d, m, kStAttack) ? 1 :
 // Civilians never fight back: impacts route to the scared states instead of Attack.
 int civ_skeleton(Drone& d, const Msg& m) { return skel_common(d, m, kStCivilianScared) ? 1 : 0; }
 
+bool sees_armed_opponent(const Drone& d) {
+    return (d.sight_flags & sight::kSeen) && opponent_armed(d);
+}
+
+bool near_armed_person(const Drone& d) {
+    if (!d.has_beh(beh::kSeesOpponents) || (d.sight_flags & sight::kSeen) == 0) return false;
+    const auto level = d.sys->config().level_id;
+    return level == 0x7000009 || level == 0x700000a || (d.char_class != 0x0d && opponent_armed(d));
+}
+
+void react_to_armed_opponent(Drone& d) {
+    d.flags |= flag::kSawPlayer;
+    if (d.has_beh(beh::kShoutsOnFirstSight) && !(d.flags & flag::kFirstSightShoutSent)) {
+        d.alert_flags |= 1;
+        alert_others(d, kMsgShoutFirstSight, d.opponent, d.opp_last_known, 0.76f);
+        d.flags |= flag::kFirstSightShoutSent;
+    }
+}
+
 // Walk the AI goal; on arrival (or route failure) enter `arrived`, else play `move_anim`.
 bool walk_goal(Drone& d, int arrived, int move_anim = kRun) {
     const int status = move_to_ai_goal(d);
@@ -131,7 +150,7 @@ int state_hostage_idle(Drone& d, const Msg& m) {
         stand_idle_anim(d, false);
         return 1;
     case kMsgTick:
-        update_patrol_route(d);
+        stand_idle_anim(d, true);
         return 1;
     default:
         return civ_skeleton(d, m);
@@ -184,13 +203,20 @@ int state_civilian(Drone& d, const Msg& m) {
     case kMsgNone:
         return 1;
     case kMsgEnter:
-        d.flags |= flag::kAware;
+        if (d.char_class == 0x0d) { d.set_state(kStPartyGirl); return 1; }
+        if (d.char_class == 0x0f) { d.set_state(kStTruckDriverIdle); return 1; }
+        d.flags |= flag::kAware | flag::kAlertableByDroneSight;
         stand_idle_anim(d, false);
         return 1;
     case kMsgTick: {
-        // Gunfire / alerts / seeing the player's weapon send civilians to CivilianScared.
-        if (d.shot_at || (d.sight_flags & sight::kSeen)) {
-            civilian_scare(d);
+        if (near_armed_person(d)) {
+            react_to_armed_opponent(d);
+            if (d.char_class == 0x10) {
+                d.side = kSideEnemy;
+                d.set_state(kStAttack);
+            } else {
+                civilian_scare(d);
+            }
             return 1;
         }
         update_patrol_route(d);
@@ -266,16 +292,42 @@ int state_civilian_mission(Drone& d, const Msg& m) {
     case kMsgNone:
         return 1;
     case kMsgEnter:
-        d.flags |= flag::kAware;
-        refind_mission_path(d);
+        if (d.char_class == 0x13) { d.set_state(kStKikoMission); return 1; }
+        d.flags |= flag::kAware | flag::kAlertableByDroneSight;
+        if ((!d.nav || !d.nav->mission_route().valid()) && d.has_beh(0x1d))
+            assign_ai_path(d, pathflag::kMission);
+        walk_idle_anim(d, false);
         return 1;
-    case kMsgTick:
+    case kMsgTick: {
         if (d.shot_at) {
             civilian_scare(d);
             return 1;
         }
-        walk_goal(d, kStCivilianMissionWait, kWalk);
+        if (near_armed_person(d)) {
+            react_to_armed_opponent(d);
+            if (d.char_class == 0x10) {
+                d.side = kSideEnemy;
+                d.set_state(kStAttack);
+                return 1;
+            }
+            civilian_scare(d);
+            return 1;
+        }
+        NodeRef reached;
+        const auto result = static_cast<RouteStatus>(follow_ai_path(d, &reached));
+        if (reached.valid() && d.alertness < 0.33f &&
+            (d.sys->nav()->paths()[reached.path].nodes[reached.node].flags & nodeflag::kWait)) {
+            d.set_state(kStCivilianMissionWait);
+        } else if (result == RouteStatus::Arrived) {
+            d.behaviour[d.active_behaviour].set(0x1d, 0);
+            d.set_state(kStCivilian);
+        } else if (result == RouteStatus::Following || result == RouteStatus::Straight) {
+            walk_idle_anim(d, true);
+        } else {
+            stand_idle_anim(d, true);
+        }
         return 1;
+    }
     default:
         return civ_skeleton(d, m);
     }
@@ -287,10 +339,11 @@ int state_civilian_mission_wait(Drone& d, const Msg& m) {
         return 1;
     case kMsgEnter:
         d.flags |= flag::kAware;
+        d.mv.have_dest = false;
         stand_idle_anim(d, false);
-        set_idle_timeout(d, 5, 5);
+        d.timer1 = {d.now() + d.seconds(2.0f), 0};
         return 1;
-    case kMsgTimeout:
+    case kMsgTimer1:
         d.set_state(kStCivilianMission);
         return 1;
     case kMsgTick:
@@ -360,7 +413,12 @@ int state_enemy_mission(Drone& d, const Msg& m) {
 int state_party_girl_init(Drone& d, const Msg& m) {
     if (m.id == kMsgNone) return 1;
     if (m.id == kMsgEnter || m.id == kMsgTick) {
-        d.set_state(kStPartyGirl);
+        if (d.has_beh(0x1d) && assign_ai_path(d, pathflag::kMission))
+            d.set_state(kStCivilianMission);
+        else {
+            d.behaviour[d.active_behaviour].set(0x1d, 0);
+            d.set_state(kStPartyGirl);
+        }
         return 1;
     }
     return civ_skeleton(d, m);
@@ -371,15 +429,19 @@ int state_party_girl(Drone& d, const Msg& m) {
     case kMsgNone:
         return 1;
     case kMsgEnter:
-        d.flags |= flag::kAware;
+        if (d.char_class == 0x12) { d.set_state(kStCivilian); return 1; }
+        if (assign_ai_path(d, pathflag::kPatrol)) { d.set_state(kStCivilianPatrol); return 1; }
+        d.flags |= flag::kAware | flag::kAlertableByDroneSight;
         stand_idle_anim(d, false);
         return 1;
     case kMsgTick:
-        if (d.shot_at) {
+        if (near_armed_person(d)) {
+            react_to_armed_opponent(d);
+            if (d.has_beh(beh::kFailsMissionOnFirstSight)) mission_fail(d, 0xb);
             civilian_scare(d);
             return 1;
         }
-        update_patrol_route(d);
+        stand_idle_anim(d, true);
         return 1;
     default:
         return civ_skeleton(d, m);
@@ -392,15 +454,17 @@ int state_civilian_guard(Drone& d, const Msg& m) {
     case kMsgNone:
         return 1;
     case kMsgEnter:
-        d.flags |= flag::kAware;
-        anim_call(d, 0, kStandAlert);
+        d.flags |= flag::kAware | flag::kAlertableByDroneSight;
+        d.initial_state = kStAttack;
+        anim_call(d, 0, d.alertness >= 0.66f ? kStandAlert : kStandIdle1);
+        return 1;
+    case kMsgLeave:
+        d.side = kSideEnemy;
         return 1;
     case kMsgTick: {
-        if (d.opponent.valid() && (d.sight_flags & sight::kSeen) && opponent_armed(d)) {
-            // Armed intruder challenged...
-            anim_call(d, 0, kChallenge);
-            d.set_state(kStCivilianChallenge);
-            return 1;
+        if (near_armed_person(d) || sees_armed_opponent(d)) {
+            react_to_armed_opponent(d);
+            d.set_state(kStAttack);
         }
         return 1;
     }
@@ -441,26 +505,84 @@ int state_ambush_wait(Drone& d, const Msg& m) {
     }
 }
 
+struct DoorGuardSlot : SlotBase {
+    int zone = 0;
+    Vec3 front{}, across{};
+    float width = 0.0f;
+};
+
+void pair_door_guards(Drone& d) {
+    if (sx(d).door_partner != -1) return;
+    Drone* partner = nullptr;
+    float nearest = 1000.0f;
+    for (Drone* candidate : sp_of(d).sp_drones()) {
+        if (candidate == &d || candidate->dtype != 0x16 || !candidate->alive() || candidate->hidden ||
+            sx(*candidate).door_partner != -1 ||
+            (candidate->start_channel != 0 && !sp_of(d).channels.on(candidate->start_channel))) continue;
+        const Vec3 gap = sx(*candidate).spec.pos - sx(d).spec.pos;
+        const float distance = std::hypot(gap[0], gap[2]);
+        if (std::abs(gap[1]) < 2.0f && distance > 0.01f && distance < nearest) {
+            nearest = distance;
+            partner = candidate;
+        }
+    }
+    if (!partner) return;
+    sx(d).door_partner = partner->id;
+    sx(*partner).door_partner = d.id;
+    Vec3 across = (sx(*partner).spec.pos - sx(d).spec.pos) * (1.0f / nearest);
+    across[1] = 0.0f;
+    Vec3 front{across[2], 0.0f, -across[0]};
+    if (dot(front, d.forward()) < 0) front = front * -1.0f;
+    auto& a = sx(d).slot<DoorGuardSlot>();
+    auto& b = sx(*partner).slot<DoorGuardSlot>();
+    a.front = b.front = front;
+    a.across = across;
+    b.across = across * -1.0f;
+    a.width = b.width = nearest;
+}
+
 int state_civilian_door_guard(Drone& d, const Msg& m) {
     switch (m.id) {
     case kMsgNone:
         return 1;
     case kMsgEnter:
-        d.flags |= flag::kAware;
-        anim_call(d, 0, kStandAlert);
-        set_idle_timeout(d, 4, 4);
+        pair_door_guards(d);
+        d.flags |= flag::kAware | flag::kAlertableByDroneSight;
+        d.initial_state = kStAttack;
+        anim_call(d, 0, kStandIdle1);
         return 1;
-    case kMsgTimeout:
-        // Door-guard patrol beat: walk the mission route and come back.
-        refind_mission_path(d);
-        d.set_state(kStGoToGoalPosition);
+    case kMsgLeave:
+        d.side = kSideEnemy;
         return 1;
-    case kMsgTick:
-        if (d.opponent.valid() && (d.sight_flags & sight::kSeen)) {
-            d.set_state(kStCivilianChallenge);
+    case kMsgTick: {
+        if (near_armed_person(d)) {
+            react_to_armed_opponent(d);
+            d.set_state(kStAttack);
             return 1;
         }
+        // NDrone2_DoorGuardHandler uses the paired guards as posts for a restricted doorway.
+        auto& post = sx(d).slot<DoorGuardSlot>();
+        const Vec3 delta = d.opp_vec + d.pos - sx(d).spec.pos;
+        const float across = dot(post.across, delta), front = dot(post.front, delta);
+        int zone = 0;
+        if (d.opponent.valid() && post.width > 0 && std::abs(d.opp_vec[1]) <= 2.0f && across >= 0 &&
+            across <= post.width && front >= -6.0f && front < 6.0f)
+            zone = front < 0 ? 3 : (front < 2.0f ? 2 : 1);
+        if (zone > 0) set_angle_to_obj(d, d.opponent, 0.0f);
+        if (zone == post.zone) return 1;
+        post.zone = zone;
+        if (zone == 3) {
+            sp_of(d).speak_line(d, 0x8f + int(d.sys->rand_int(4)));
+            mission_fail(d, 0xc);
+            d.set_state(kStAttack);
+        } else if (zone == 2) {
+            sp_of(d).speak_line(d, 0x4f + int(d.sys->rand_int(2)));
+            anim_call(d, 0, kWave, 1);
+        } else {
+            anim_call(d, 0, kStandIdle1);
+        }
         return 1;
+    }
     default:
         return skeleton(d, m);
     }

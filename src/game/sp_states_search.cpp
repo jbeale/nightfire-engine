@@ -117,7 +117,7 @@ int state_heard_noise_suspect(Drone& d, const Msg& m) {
         }
         e.noise_level = 3;
         drone::alert_status_set(d, AlertStatus::Alert);
-        talk(d, Speech::Other);   // DroneFunc_HeardNoiseTalk
+        talk(d, Speech::HeardNoise);
         e.heard_noise = true;
         d.flags |= flag::kAlertableByDroneSight;
         if ((d.flags & flag::kStationary) == 0 && !d.has_beh(beh::kNeverMovesInCombat)) {

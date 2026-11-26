@@ -1,5 +1,6 @@
 #include "assets/mission_data.hpp"
 
+#include <algorithm>
 #include <charconv>
 
 namespace nf {
@@ -47,6 +48,10 @@ std::vector<MissionEntry> load_mission_data(const Elf32& elf) {
         }
         out.push_back(std::move(e));
     }
+    for (MissionEntry& entry : out)
+        entry.has_later_objectives = std::any_of(out.begin(), out.end(), [&](const MissionEntry& other) {
+            return other.base == entry.base && other.order > entry.order && !other.objectives.empty();
+        });
     return out;
 }
 

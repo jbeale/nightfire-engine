@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <vector>
@@ -99,6 +100,7 @@ struct PlaceResult {
 
 class CollisionWorld {
 public:
+    CollisionWorld();
     // Parses the coll_data_new block of every world placement (map_data_static flag 0x8000: the
     // original's cels) and builds their world-space bounds. Placements without collision, and the
     // object-class statics (spawn markers, props, pickups: parsemap_create_dynamic_objects), are
@@ -146,6 +148,11 @@ public:
         const Mat4& transform;       // model -> world
     };
     Solid solid(std::size_t i) const;
+    // Replace a dynamic prop's collision at its authored transform.
+    void set_object_model(const Level& level, std::size_t placement, std::size_t model);
+    void add_model(const Level& level, std::size_t handle, std::size_t chunk, std::size_t model, const Mat4& transform);
+    void move_model(std::size_t handle, const Mat4& transform);
+    Vec3 carry_point(std::size_t handle, const Mat4& next, const Vec3& point) const;
 
     // Instrumentation for tools.
     struct Stats {
@@ -155,8 +162,10 @@ public:
 
 private:
     CollisionWorld(Level& level, std::optional<std::span<const std::uint32_t>> object_classes);
+    void add_solid(std::size_t placement, const Mat4& transform, std::shared_ptr<const Collision> collision);
 
     struct Item;
+    static bool set_transform(Item& item, const Mat4& transform);
     std::vector<Item> items_;
     Stats stats_;
 };

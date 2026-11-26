@@ -1,12 +1,13 @@
 #pragma once
 
 // DroneRenderer: draws every drone with CharacterRenderer (header-only so nf_game keeps no GL dependency).
-// The model matrix uses the bot's root position or the single-player drone's feet, with +z forward.
+// The model matrix uses the drone's root position, with +z forward.
 // A weapon skin (DroneLook::weapon_model_hash) is attached at the hand datum (DroneLook::hand_datum)
 // through CharacterInstance::datum_world, as AnimDatumSetEntity does.
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <unordered_map>
 #include <vector>
 
@@ -22,8 +23,13 @@ inline Mat4 drone_model_matrix(const Vec3& origin, float yaw) {
 }
 
 inline Vec3 drone_render_origin(const Drone& d) {
-    // The animated bot palette has its root translation extracted. Place that root at the body center.
-    return d.is_bot() ? d.pos : d.feet();
+    // CharacterInstance removes root translation in both campaign and multiplayer.
+    Vec3 origin = d.pos;
+    // Grounded campaign movement consumes only horizontal root motion. Retain the authored
+    // descent of a falling body in the render pose without moving the collision capsule.
+    if (d.character && d.death_start_root_height && !d.mv.disabled)
+        origin[1] += std::min(0.0f, d.character->root_height() - *d.death_start_root_height);
+    return origin;
 }
 
 class DroneRenderer {
@@ -61,16 +67,17 @@ public:
         for (const auto& dp : sys.drones()) previous_.push_back({dp.get(), drone_render_origin(*dp), dp->yaw});
     }
 
-    void draw(const Camera& cam, float aspect, const DroneSystem& sys, float alpha = 1.0f) {
+    void draw(const Camera& cam, float aspect, const DroneSystem& sys, float alpha = 1.0f,
+              const std::function<CharacterLighting(const Vec3&)>& lighting = {}) {
         alpha = std::clamp(alpha, 0.0f, 1.0f);
         for (const auto& dp : sys.drones()) {
             const Drone& d = *dp;
             if (!d.character || d.hidden) continue;
             const RenderPose pose = interpolated_pose(d, alpha);
             const Mat4 model = drone_model_matrix(pose.origin, pose.yaw);
-            CharacterLighting light;
+            CharacterLighting light = lighting ? lighting(pose.origin) : CharacterLighting{};
             const float k = std::max(0.15f, d.fade);   // fading corpses darken (no alpha pass in CharacterRenderer)
-            light.tint = {k, k, k};
+            for (float& component : light.tint) component *= k;
             chars_.draw(cam, aspect, d.character->skin(), d.character->palette(), model, 0, d.character->facial(), light);
             if (d.look.weapon_model_hash != 0 && d.look.hand_datum >= 0) {
                 const SkinDef* ws = bank_.skin(d.look.weapon_model_hash);

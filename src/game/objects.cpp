@@ -7,6 +7,7 @@
 #include "assets/collision.hpp"  // parse_collision (script-driven mover bounds)
 #include "assets/cutscene.hpp"  // spline_eval3d / slerp_acc (framelist eval)
 #include "game/damage.hpp"
+#include "game/player_basis.hpp"
 #include "game/sp_common.hpp"  // SwitchChannels
 #include "game/weapons.hpp"
 
@@ -190,32 +191,22 @@ void SpObjects::build() {
             sensors_.push_back(se);
             break;
         }
-        case 222: {  // Searchlight_Create: alarm = p1, sweep range = p4/p5 degrees
-            Sensor se;
-            se.placement = i;
-            se.alarm_channel = uparam16(s, 1);
-            se.range = 60.0f;
-            se.half_sin = 0.05f;
-            // Sweep (`Searchlight_Update` case 0): center/half of the p4/p5 degree range.
-            // `fix(v)` transcribes the original's int handling bit-for-bit (round-half-to-even
-            // for v >= 0; unspecified garbage for v < 0, replicated as written).
-            const auto fix = [](std::int32_t v) -> float {
-                const std::uint32_t h = (std::uint32_t(v) & 1u) | (std::uint32_t(v) >> 1);
-                return float(h) + float(h);
-            };
-            const float lo = fix(std::min(std::int32_t(uparam(s, 4)), std::int32_t(uparam(s, 5))));
-            const float hi = fix(std::max(std::int32_t(uparam(s, 4)), std::int32_t(uparam(s, 5))));
-            if (lo != hi) {
-                se.sweep = true;
-                se.amp = (hi - lo) * 0.5f * 0.017453294f;
-                se.base_yaw = (hi + lo) * 0.5f * 0.017453294f;
-                // Pitch center is the raw aim component (`+20` = Create arg's 2nd float).
-                se.base_pitch = level_.placements()[i].transform[9];
-                // Desynced start phases (`Rand_Rand(480)` in the original, drawn here in
-                // static order like parsemap from the process-global stream).
-                se.phase = float(game_rng().rand_int(480));
-            }
-            sensors_.push_back(se);
+        case 222: {  // Searchlight_Create: head (1), impact pool (2), and beam (3).
+            if (uparam(s, 0) != 1) break;
+            Searchlight light;
+            light.head = i;
+            light.on = uparam16(s, 1);
+            light.off = uparam16(s, 2);
+            light.alarm = uparam16(s, 3);
+            const float lo = float(std::min(uparam(s, 4), uparam(s, 5))) * 0.017453294f;
+            const float hi = float(std::max(uparam(s, 4), uparam(s, 5))) * 0.017453294f;
+            light.base_yaw = std::atan2(p.transform[8], p.transform[10]);
+            light.base_pitch = -(lo + hi) * 0.5f;
+            light.amp = (hi - lo) * 0.5f;
+            light.yaw = light.base_yaw;
+            light.pitch = light.base_pitch;
+            light.phase = float(game_rng().rand_int(480));
+            searchlights_.push_back(light);
             break;
         }
         case 224: {  // Copter / GunImp / Shooter / Creature: scripted shooters
@@ -323,12 +314,13 @@ void SpObjects::build() {
             doors_.push_back(d);
             break;
         }
-        case 240: {  // Pickup_Create: kind = p0, id = p1, amount = p2, sound = p4, respawn = p6
+        case 240: {  // Pickup_Create: kind = p0, id = p1, amount = p2, channel = p3, sound = p4
             PickupObj pk;
             pk.placement = i;
             pk.kind = uparam16(s, 0);
             pk.arg0 = uparam(s, 1);
             pk.arg1 = uparam(s, 2);
+            pk.channel = uparam16(s, 3);
             pk.sound = uparam(s, 4);
             if (pk.sound == 0xFFFF) pk.sound = 245;
             pk.respawn = uparam(s, 6);
@@ -354,10 +346,28 @@ void SpObjects::build() {
             }
         }
     }
+    for (Searchlight& light : searchlights_) {
+        float beam_distance = 9.0f, pool_distance = 9.0f;
+        for (std::size_t i = 0; i < level_.placements().size(); ++i) {
+            const StaticInstance* part = statics(i);
+            if (!part || part->object_class() != 222) continue;
+            const Vec3 delta = placement_pos(i) - placement_pos(light.head);
+            const float distance = dot(delta, delta);
+            if (uparam(*part, 0) == 3 && distance < beam_distance) {
+                light.beam = i;
+                beam_distance = distance;
+            } else if (uparam(*part, 0) == 2 && distance < pool_distance) {
+                light.pool = i;
+                pool_distance = distance;
+            }
+        }
+    }
+    trigger_meshes_.resize(level_.placements().size());
     // Cache world-space bounds per placement with collision (touch tests + movers run per tick).
     for (std::size_t i = 0; i < trigger_volumes_.solid_count(); ++i) {
         const auto solid = trigger_volumes_.solid(i);
         if (solid.collision.tris.empty()) continue;
+        trigger_meshes_[solid.placement] = true;
         const bool fresh = bounds_.count(solid.placement) == 0;
         auto& slot = bounds_[solid.placement];
         bool init = fresh;
@@ -857,6 +867,17 @@ void SpObjects::tick(const std::vector<Toucher>& touchers, const std::vector<boo
         }
         return false;
     };
+    std::vector<bool> touched_meshes(trigger_meshes_.size());
+    bool has_capsule = false;
+    for (const Toucher& t : touchers) {
+        if (!t.is_player || !t.capsule) continue;
+        has_capsule = true;
+        CylinderQuery capsule = *t.capsule;
+        capsule.pick = 0;
+        capsule.hit = hitflag::kNoPushOut;
+        for (const auto& hit : trigger_volumes_.cylinder(capsule).hits)
+            touched_meshes[hit.placement] = true;
+    }
     auto use_near = [&](std::size_t placement, float radius) {
         const auto pp = placement_pos(placement);
         for (const Toucher& t : touchers) {
@@ -958,7 +979,8 @@ void SpObjects::tick(const std::vector<Toucher>& touchers, const std::vector<boo
     // ---- touch triggers ----
     for (TriggerObject& t : triggers_) {
         if (t.gate_channel != 0 && !channels_.on(int(t.gate_channel))) continue;
-        const bool touch = touching(t.placement, true);
+        const bool mesh_trigger = (t.type == 1 || t.type == 2) && trigger_meshes_[t.placement];
+        const bool touch = mesh_trigger && has_capsule ? touched_meshes[t.placement] : touching(t.placement, true);
         const bool was = t.touched;
         t.touched = touch;
         switch (t.type) {
@@ -994,9 +1016,11 @@ void SpObjects::tick(const std::vector<Toucher>& touchers, const std::vector<boo
             const std::uint16_t cond = t.inputs[0];  // editor param 2 (branch B)
             if (cond != 0 && channels_.on(int(cond))) {
                 const std::uint16_t done = t.inputs[2];  // editor param 4 (D)
+                exit_channel_ = done;
                 if (done != 0) channels_.set(int(done), true);
             } else {
                 const std::uint16_t out = t.inputs[1];  // editor param 3 (C)
+                exit_channel_ = out;
                 if (out != 0) channels_.set(int(out), true);
             }
             load_level_ = t.level_id;
@@ -1120,6 +1144,70 @@ void SpObjects::tick_switches(const std::vector<Toucher>& touchers, const std::v
     }
 }
 
+std::optional<Vec3> SpObjects::update_searchlights(const std::vector<Toucher>& touchers,
+                                                        const CollisionWorld& world, float frames) {
+    std::optional<Vec3> detected;
+    const auto orient = [](const Vec3& forward, const Vec3& up, const Vec3& pos, float reach = 1.0f) {
+        Vec3 lateral = cross(up, forward);
+        if (length(lateral) < 0.001f) lateral = cross(Vec3{0, 0, 1}, forward);
+        const Vec3 right = normalised(lateral);
+        const Vec3 vertical = cross(forward, right);
+        const Vec3 span = forward * reach;
+        return Mat4{right[0], right[1], right[2], 0, vertical[0], vertical[1], vertical[2], 0,
+                    span[0], span[1], span[2], 0, pos[0], pos[1], pos[2], 1};
+    };
+    const auto viewer = std::find_if(touchers.begin(), touchers.end(), [](const Toucher& p) { return p.is_player; });
+    for (Searchlight& light : searchlights_) {
+        if (light.beam != SIZE_MAX) hides_.push_back(light.beam);
+        if (light.pool != SIZE_MAX) hides_.push_back(light.pool);
+        if ((light.on != 0 && !channels_.on(light.on)) || (light.off != 0 && channels_.on(light.off))) continue;
+        const Vec3 origin = placement_pos(light.head);
+        if (light.hold <= 0) {
+            const float phase = light.phase * 0.013089971f;
+            light.yaw = light.base_yaw + std::cos(phase) * light.amp;
+            light.pitch = light.base_pitch - std::sin(phase) * light.amp;
+            light.phase = std::fmod(light.phase + frames, 480.0f);
+        }
+        const Vec3 dir{std::sin(light.yaw) * std::cos(light.pitch), std::sin(light.pitch),
+                       std::cos(light.yaw) * std::cos(light.pitch)};
+        const auto impact = world.ray(origin + dir * 0.15f, origin + dir * 100.0f, pick::kIgnoreGhost);
+        bool was_lit = false;
+        if (impact) {
+            for (const Toucher& p : touchers) {
+                if (!p.is_player || length(p.pos - impact->point) > 2.0f) continue;
+                if (!world.line_of_sight(origin + dir * 0.15f, p.pos, pick::kIgnoreGhost)) continue;
+                detected = p.pos;
+                was_lit = true;
+                const Vec3 to = p.pos - Vec3{0, 1, 0} - origin;
+                const float target_yaw = light.base_yaw + std::clamp(std::remainder(
+                    std::atan2(to[0], to[2]) - light.base_yaw, 6.2831853f), -light.amp, light.amp);
+                const float target_pitch = std::clamp(std::atan2(to[1], std::hypot(to[0], to[2])),
+                                                      light.base_pitch - light.amp, light.base_pitch + light.amp);
+                light.yaw += (target_yaw - light.yaw) * 0.15f * frames;
+                light.pitch += (target_pitch - light.pitch) * 0.15f * frames;
+                break;
+            }
+        }
+        light.hold = was_lit ? 900.0f : std::max(0.0f, light.hold - frames);
+        if (light.hold > 0 && light.alarm != 0) channels_.set(light.alarm, true);
+        if (light.beam != SIZE_MAX) {
+            const auto& p = level_.placements()[light.beam];
+            const auto& mesh = level_.mesh(p.chunk, p.model);
+            const Vec3 end = impact ? impact->point : origin + dir * 100.0f;
+            const float beam_length = std::max(1.0f, mesh.bbox_max[2] - mesh.bbox_min[2]);
+            const Vec3 up = viewer == touchers.end() ? Vec3{0, 1, 0} : viewer->pos - origin;
+            draws_.push_back({light.beam, orient(dir, up, origin, length(end - origin) / beam_length)});
+        }
+        if (light.pool != SIZE_MAX && impact) {
+            const Vec3 normal = impact->normal;
+            const Vec3 axis = std::fabs(normal[2]) > 0.9f ? Vec3{1, 0, 0} : Vec3{0, 0, 1};
+            const Vec3 tangent = normalised(axis - normal * dot(axis, normal));
+            draws_.push_back({light.pool, orient(tangent, normal, impact->point + normal * 0.015f)});
+        }
+    }
+    return detected;
+}
+
 void SpObjects::tick_damage(const std::vector<Toucher>& touchers, const WeaponEvents& weapon_events,
                             float dt_frames, WeaponSystem* weapons, const HurtSink& hurt) {
     // Breakables from bullets and blasts (`Break_Kill` / `Destroy_Smash` essence).
@@ -1146,7 +1234,7 @@ void SpObjects::tick_damage(const std::vector<Toucher>& touchers, const WeaponEv
     for (Breakable& b : breakables_) {
         if (b.broken) hides_.push_back(b.placement);
     }
-    // Sensors and searchlights: cone trip raises the alarm channel.
+    // Fixed sensors: cone trip raises the alarm channel.
     for (Sensor& se : sensors_) {
         if (se.gate_channel != 0 && !channels_.on(int(se.gate_channel))) {
             if (se.tripped && se.alarm_channel != 0) channels_.set(int(se.alarm_channel), false);
@@ -1160,16 +1248,6 @@ void SpObjects::tick_damage(const std::vector<Toucher>& touchers, const WeaponEv
             dir[0] /= dl;
             dir[1] /= dl;
             dir[2] /= dl;
-        }
-        if (se.sweep) {
-            // `Searchlight_Update` case 0: sinusoidal pan (cos via sin(+pi/2), same assoc).
-            se.phase += 1.0f;  // `FRAME_RATE_MUL`; the discarded `fmodf` is not replicated
-            const float a = se.phase * 0.013089971f;
-            const float yaw = std::sin(a) * se.amp + se.base_yaw;
-            const float pitch = std::sin(a + 1.5707964f) * se.amp + se.base_pitch;
-            const float cy = std::cos(yaw), sy = std::sin(yaw);
-            const float cp = std::cos(pitch), sp = std::sin(pitch);
-            dir = {sy * cp, sp, cy * cp};  // `Vec_Spherical_2_Cartesian` convention
         }
         const auto origin = placement_pos(se.placement);
         bool trip = false;
@@ -1259,16 +1337,32 @@ void SpObjects::tick_damage(const std::vector<Toucher>& touchers, const WeaponEv
             if (!t.is_player || t.slot < 0) continue;
             if (dist2(pp, t.pos) > 1.5f * 1.5f) continue;
             const int id = int(pk.arg0), rounds = int(pk.arg1);
-            if (pk.kind == 1) granted = weapons->give_weapon(t.slot, id, rounds);
-            else if (pk.kind == 3) granted = weapons->give_ammo(t.slot, id, rounds);
-            else if (pk.kind == 6) granted = weapons->give_weapon(t.slot, id, 0);
+            if (pk.kind == 0) granted = weapons->give_weapon(t.slot, weapons->table().upgrade(id), rounds);
+            else if (pk.kind == 1) granted = weapons->give_ammo(t.slot, id, rounds);
+            else if (pk.kind == 3) granted = weapons->give_armour(t.slot, 50.0f);
+            else if (pk.kind == 4) granted = true;
+            else if (pk.kind == 6) {
+                granted = true;
+                ++bond_pickups_;
+            }
             else granted = weapons->give_weapon(t.slot, id, rounds) || weapons->give_ammo(t.slot, id, rounds);
             if (granted) {
+                if (pk.channel != 0) channels_.set(int(pk.channel), true);
                 if (pk.sound != 0 && pk.sound != 0xFFFF) sounds_.push_back({pk.sound, pp, false});
                 pk.taken = true;
+                if (pk.kind == 6) pk.respawn = 0;
                 pk.respawn_in = float(pk.respawn);
             }
             break;
+        }
+        if (pk.kind == 6) {
+            hides_.push_back(pk.placement);
+            if (!pk.taken) {
+                const float angle = float(tick_ % 180) * 0.03490659f;
+                const float c = std::cos(angle), s = std::sin(angle);
+                const Mat4 spin{c, 0, -s, 0, 0, 1, 0, 0, s, 0, c, 0, 0, 0, 0, 1};
+                draws_.push_back({pk.placement, mul(level_.placements()[pk.placement].transform, spin)});
+            }
         }
     }
     // Rotors spin for the renderer.

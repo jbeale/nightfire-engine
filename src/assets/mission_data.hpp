@@ -63,6 +63,7 @@ struct MissionEntry {
     std::vector<MissionObjective> objectives;
     std::uint32_t profile = 0;
     std::uint32_t unlock = 0;
+    bool has_later_objectives = false;
 };
 
 // Loads all 24 entries (objectives resolved through the .data pointers).

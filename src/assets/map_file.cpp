@@ -1,5 +1,7 @@
 #include "assets/map_file.hpp"
 
+#include <algorithm>
+
 namespace nf {
 
 namespace {
@@ -160,6 +162,14 @@ MapChunk parse_map_chunk(Bytes file) {
     chunk.blocks = walk_blocks(file);
     chunk.textures = decode_textures(chunk.blocks);
     chunk.models = parse_models(chunk.blocks);
+    for (const Block& block : chunk.blocks) {
+        if (block.id != std::uint8_t(BlockId::Lod)) continue;
+        const std::size_t count = std::min(chunk.models.size(), (block.data.size() - 4) / 8);
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto lod = load<std::int32_t>(block.data, 4 + i * 8);
+            if (lod >= 0 && std::size_t(lod) < chunk.models.size()) chunk.models[i].linked_lod = lod;
+        }
+    }
     chunk.statics = parse_statics(chunk.blocks);
     return chunk;
 }

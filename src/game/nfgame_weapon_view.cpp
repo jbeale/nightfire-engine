@@ -26,13 +26,14 @@ Vec3 WeaponView::draw(const Camera& cam, float aspect, const ViewModel& vm, cons
                 vm.datum0_part, vm.datum0_entity,
                 vm.datum0_entity ? vm.anim->datum_world(0) : identity(), true);
 
-    const bool laser = def.has(wf1::kLaserSight);
+    constexpr int kLaserDatum = 4;
+    const bool laser = def.has(wf1::kLaserSight) && vm.skin->find_datum(kLaserDatum);
     const bool flash = vm.muzzle_flash > 0.0f;
     if (!laser && !flash) return {0, 0, 0};
     // Player_MuzzleFlash lights bone 0 (4 for alternating-hand weapons), but the visible point is the
     // furthest-down-range gun datum (datum ids vary per skin), falling back to the spec's bones.
     Vec3 local{0, 0, 0};
-    if (!vm.skin->datums.empty()) {
+    if (flash && !vm.skin->datums.empty()) {
         float best = -1e30f;
         for (const Datum& datum : vm.skin->datums) {
             const Vec3 p = transform_point(vm.anim->datum_world(datum.id), Vec3{0, 0, 0});
@@ -43,7 +44,7 @@ Vec3 WeaponView::draw(const Camera& cam, float aspect, const ViewModel& vm, cons
                 local = p;
             }
         }
-    } else {
+    } else if (flash) {
         std::size_t bone = 0;
         if (def.has(wf1::kAlternateHands) && vm.skin->parent.size() > 4) bone = 4;
         local = transform_point(vm.anim->bone_world(bone), Vec3{0, 0, 0});
@@ -54,19 +55,28 @@ Vec3 WeaponView::draw(const Camera& cam, float aspect, const ViewModel& vm, cons
     glDepthMask(GL_FALSE);
     quads_.set_additive(true);
     if (laser) {
-        // Player_LaserPointer casts from the eye along the gun's +z axis, and places its beam/impact at that
-        // ray's first hit (or at the 100-unit limit). Start the visible beam at the weapon datum.
-        Vec3 laser_end = cam.eye + z * 100.0f;
+        // Player_LaserPointer gets both ends from the animated laser attachment. Its collision
+        // ray starts at the eye and ends 100 units forward of that attachment.
+        const Mat4 sight = mul(model, vm.anim->datum_world(kLaserDatum));
+        const Vec3 origin = transform_point(sight, {});
+        Vec3 laser_end = transform_point(sight, {0, 0, 100});
+        bool impacted = false;
         if (collision) {
-            if (const auto hit = collision->ray(cam.eye, laser_end, 8)) laser_end = hit->point;
+            if (const auto hit = collision->ray(cam.eye, laser_end, 8)) {
+                laser_end = hit->point;
+                impacted = true;
+            }
         }
-        const Vec3 beam = laser_end - muzzle;
+        const Vec3 beam = laser_end - origin;
         const float beam_length = length(beam);
         if (beam_length > 1.0e-3f) {
             const Vec3 beam_dir = beam * (1.0f / beam_length);
+            const Vec3 side = cross(beam_dir, origin - cam.eye);
+            const float side_length = length(side);
             const std::array<float, 4> color{1.0f, 0.035f, 0.015f, 0.8f};
-            quads_.draw(vp, (muzzle + laser_end) * 0.5f, right, beam_dir, 0.004f, beam_length, color);
-            quads_.draw(vp, laser_end, r, u, 0.055f, 0.055f, color, quads_.soft_dot());
+            quads_.draw(vp, (origin + laser_end) * 0.5f, side_length > 1.0e-3f ? side * (1.0f / side_length) : r,
+                        beam_dir, 0.004f, beam_length, color);
+            if (impacted) quads_.draw(vp, laser_end, r, u, 0.055f, 0.055f, color, quads_.soft_dot());
         }
     }
     if (flash) {

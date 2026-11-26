@@ -69,7 +69,7 @@ bool skel_common(Drone& d, const Msg& m, int impact_default_state) {
 }
 
 void talk(Drone& d, Speech what) {
-    if (SpExt* e = sx_or_null(d); e && e->sp->speech) e->sp->speech(d, what);
+    if (SpExt* e = sx_or_null(d)) e->sp->speak(d, what);
 }
 
 void enable_drone(Drone& d, bool enable) {

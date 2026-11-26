@@ -171,7 +171,13 @@ void MenuManager::update_label(Page& page, Control& owner, LabelState& l, Rect r
         if (!c.text.empty()) out.push_back(std::move(c));
     } else if (l.sprite) {
         Rect dst{float(page.self->x) + r.x, float(page.self->y) + r.y, r.w, r.h};
-        out.push_back(image_cmd(l.sprite, dst, {float(l.u), float(l.v), float(l.uw) + 1, float(l.vh) + 1}, l.color, layer));
+        DrawCmd image = image_cmd(l.sprite, dst, {float(l.u), float(l.v), float(l.uw) + 1, float(l.vh) + 1},
+                                  l.color, layer);
+        if (l.sprite_flags & 0x200) image.blend = Blend::Subtractive;
+        else if (l.sprite_flags & 0x100) image.blend = Blend::Additive;
+        // psiDrawSprites halves the menu colour word's alpha before sending it to the GS.
+        image.color.a >>= 1;
+        out.push_back(std::move(image));
     }
 }
 
@@ -673,6 +679,7 @@ int MenuManager::control_message(Control& c, const Msg& m) {
                 return 1;
             case kSetOutlineColor: l.pulse_base = m.a; return 1;
             case kSetUv: l.u = std::uint16_t(m.a >> 16), l.v = std::uint16_t(m.a), l.uw = std::uint16_t(m.b >> 16), l.vh = std::uint16_t(m.b); return 1;
+            case kLabelSpriteFlags: l.sprite_flags = std::uint16_t(m.a); return 1;
             case kOutline: l.outline = (m.a & 0xFF) != 0; return 1;
             case kPulse: l.pulse = (m.a & 0xFF) != 0; return 0;
             case 0x76: l.always_selected = (m.a & 0xFF) != 0; return 0;

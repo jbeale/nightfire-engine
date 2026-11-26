@@ -36,6 +36,7 @@ public:
     virtual float radius() const = 0;
     virtual float half_height() const = 0;
     virtual bool alive() const = 0;
+    virtual bool autoaim_target() const { return true; }
     // The damage is already the raw weapon damage (bullet: def+12, explosion: distance scaled); modifiers that
     // depend on the victim (armour, head multipliers, difficulty) belong to the implementor.
     virtual void hurt(const HitInfo& hit) = 0;

@@ -1,12 +1,13 @@
 // PSS movie playback (MOVIES/30_FPS/*.PSS): MPEG-2 program streams with mpeg2video and
 // Sony private-stream PCM audio. Video decodes through libavformat/libavcodec/libswscale;
-// audio (0xBD packets: `ff a0 00 00` + s16le stereo, rate/channels from the SShd header of the
-// first packet) is extracted by the small scanner below and played through SDL3 directly
+// audio (0xBD packets carrying block-interleaved PCM, described by SShd/SSbd headers)
+// is extracted by the scanner and played through SDL3 directly
 // (AudioSystem untouched). See docs/formats.md "Movies".
 #pragma once
 
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -44,7 +45,9 @@ public:
 
     // Next video frame in presentation order (false at EOF/error). Skips nothing.
     bool next_video(MovieFrame& frame);
-    // Up to `seconds` of stereo s16 audio from the current position (false at EOF).
+    // The complete track as interleaved s16 samples, or an empty span for a silent movie.
+    std::span<const std::int16_t> audio_pcm() const;
+    // Up to `seconds` of s16 audio from the current position (false at EOF).
     bool next_audio(std::vector<std::int16_t>& pcm, double seconds);
     double audio_position() const;  // seconds consumed so far
 

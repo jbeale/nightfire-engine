@@ -76,6 +76,7 @@ bool Frontend::Impl::p_pause(ui::Control&, const ui::Msg& m) {
         return true;
     }
     if (m.type != kPageShown) return true;
+    send(0x10000184, kLabelSpriteFlags, 0x100);  // P_PAUSE's additive silhouette
     if (pause_info.multiplayer) {
         // The MP pause has no OBJECTIVES tab: SCORE, CONTROLS and MISSION are centred on the screen.
         send_ex(kPauseControl, kTabObjectives, kSetFlags, 1);

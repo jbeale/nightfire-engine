@@ -7,7 +7,7 @@
 //
 //   u16 magic (28)          u16 a (+528)   u16 nscripts (+520, < 0x3F)
 //   u16 c (+524)            u16 d (+526, end time frames)
-//   nscripts x { u16 id (+4); u16 flags (+6); u32 size; u8 data[size - 4] }
+//   nscripts x { u16 first_key; u16 last_key; u32 size; u8 data[size - 4] }
 //   u32 e (+522, low 16 kept)   u32 skip   u8 rest[skip] (+516: key tracks)
 //
 // Each script entry becomes one playback stream (`SCRIPTINFO` +168, 40 bytes). `Script_Run` is a
@@ -23,9 +23,9 @@
 //   EntityStart: u32 entity hash + 5 bytes (mode, stream, ?, ?, has_dword) [+ u32]
 //   CameraStart: u8 + u16 + u16   (`ScriptCam` = the script id while any camera runs)
 //   TextStart: u32 Txt label + u16 frames (`Text_AddMsg(-1, 0, 4, ...)` = subtitle line)
-//   SoundStart: u32 SFX id + 3 bytes (mode, obj stream, ?) (1 = 2D, 0 = 3D at the object)
+//   SoundStart: u32 SFX id + u8 mode (1 = 2D) + u8 explicit source flag + u8 source stream index
 //   FadeStart: f32 seconds (`Camera_SetFade(4, 255, 0, -t)`)
-//   AnimStart: 3 x u32 (anim script hash, ?, ?)   LightStart: 3 bytes
+//   AnimStart: 3 x u32 (anim script hash, skin hash, initial frame)   LightStart: 3 bytes
 //   SpriteStart: 5 x u16 (x, y, w, h, ?) + u32 sprite hash   SubScriptStart: u32 hash + 2 bytes
 //   EventHandler: u8 count + u8 event + count x u32 args; events (`Script_EventHandler`):
 //     3 loop/restart  4 disable player + pause stats  5 `Drone_EnableAll`  6 save anchor matrix

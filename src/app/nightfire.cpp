@@ -449,7 +449,7 @@ bool parse_args(int argc, char** argv, Args& a) {
                  takes_value("--spawn") || takes_value("--handicap") || takes_value("--seed") ||
                  takes_value("--bot-char") || takes_value("--cam") || takes_value("--follow-bot") ||
                  takes_value("--inputs2") || takes_value("--inputs3") || takes_value("--inputs4") ||
-                 takes_value("--ruleset")) &&
+                 takes_value("--ruleset") || takes_value("--mini-vehicles")) &&
                 i + 1 < argc) {
                 a.mp_args.push_back(argv[++i]);
                 if (last == "--cam") {
@@ -700,20 +700,18 @@ int run(int argc, char** argv) {
     if (!args.mission.empty()) {
         SpLaunch launch{args.mission, args.difficulty >= 0 ? args.difficulty : cfg.difficulty + 1, args.channels,
                         args.give};
-        SpSession session(*ctx, window, ui, text, launch, cfg);
-        if (!session.ready()) return 1;
-        if (args.frames >= 0 || !args.shot.empty() || !args.inputs.empty()) {
-            SpHeadless h;
-            h.frames = args.frames >= 0 ? args.frames : 300;
-            h.shot = args.shot;
-            h.inputs = args.inputs;
-            session.run_headless(h);
-            return 0;
-        }
+        const bool scripted = args.frames >= 0 || !args.shot.empty() || !args.inputs.empty();
+        SpHeadless h{args.frames >= 0 ? args.frames : 300, args.shot, args.inputs};
         while (true) {
-            const SpResult r = session.run_interactive();
+            SpSession session(*ctx, window, ui, text, launch, cfg);
+            if (!session.ready()) return 1;
+            const SpResult r = scripted ? session.run_headless(h) : session.run_interactive();
             if (r.exit == SpExit::Restart) continue;
-            break;
+            if (r.exit != SpExit::NextMission || (r.next_level & 0x0F000000) != 0x07000000) break;
+            char bin[16];
+            std::snprintf(bin, sizeof(bin), "%08x.bin", r.next_level);
+            launch = SpLaunch{bin, launch.difficulty, {}, -1, r.inventory, r.entry_channel};
+            h.inputs.clear();
         }
         return 0;
     }
@@ -778,6 +776,9 @@ int run(int argc, char** argv) {
     // ---- full game loop: frontend -> session -> results -> frontend ----
     // A mission win chains into the next sp_level row (ACTION level or driving mission).
     std::uint32_t pending_level = 0;  // nonzero: skip the frontend and launch this sp_level id
+    MissionSystem::Inventory pending_inventory;
+    std::uint16_t pending_entry = 0;
+    int pending_difficulty = cfg.difficulty + 1;
     while (true) {
         if (pending_level == 0) {
             FrontendResult result;
@@ -957,7 +958,12 @@ int run(int argc, char** argv) {
                     if (!session.ready()) break;
                     const SpResult r = session.run_interactive();
                     if (r.exit == SpExit::Restart) continue;
-                    if (r.exit == SpExit::NextMission) pending_level = r.next_level;
+                    if (r.exit == SpExit::NextMission) {
+                        pending_level = r.next_level;
+                        pending_inventory = r.inventory;
+                        pending_entry = r.entry_channel;
+                        pending_difficulty = launch.difficulty;
+                    }
                     break;
                 }
             } else if (result.action == FrontendResult::Action::StartMultiplayer && result.launch) {
@@ -1024,13 +1030,19 @@ int run(int argc, char** argv) {
         }
         char bin[16];
         std::snprintf(bin, sizeof(bin), "%08x.bin", chained);
-        SpLaunch launch{bin, cfg.difficulty + 1, {}};
+        SpLaunch launch{bin, pending_difficulty, {}, -1, std::move(pending_inventory), pending_entry};
+        pending_inventory = {};
+        pending_entry = 0;
         while (true) {
             SpSession session(*ctx, window, ui, text, launch, cfg);
             if (!session.ready()) break;
             const SpResult r = session.run_interactive();
             if (r.exit == SpExit::Restart) continue;
-            if (r.exit == SpExit::NextMission) pending_level = r.next_level;
+            if (r.exit == SpExit::NextMission) {
+                pending_level = r.next_level;
+                pending_inventory = r.inventory;
+                pending_entry = r.entry_channel;
+            }
             break;
         }
     }

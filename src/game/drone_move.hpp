@@ -36,7 +36,7 @@ int move_to_goal_position(Drone& d, const Vec3& goal, float radius = 0, bool fol
 int move_to_object(Drone& d, const TargetRef& target, float radius = 0, bool follow = true);
 // Patrol / mission route (NDrone2_FollowRoute on the mission route, NDrone2_AssignAIPath).
 bool assign_ai_path(Drone& d, std::uint32_t path_mask);
-int follow_ai_path(Drone& d);
+int follow_ai_path(Drone& d, NodeRef* reached = nullptr);
 // NDrone2_InvalidateAttackRoute / AINetwork_InvalidateRoute.
 void invalidate_attack_route(Drone& d);
 // Stop steering to a destination (no waypoint).

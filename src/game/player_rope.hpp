@@ -15,6 +15,7 @@
 namespace nf {
 
 class CharacterBank;
+class CharacterInstance;
 struct SkinDef;
 
 // The level's rope-like objects: the wires / zip lines (Wire_Create), the grapple hook points (Grapple_Create)
@@ -65,6 +66,7 @@ public:
     virtual bool stopped() const = 0;
     // AnimObjectUpdate: one logic frame; returns the root bone's translation change in the object's frame.
     virtual Vec3 tick() = 0;
+    virtual const CharacterInstance* character() const { return nullptr; }
     // AnimGetFrameTransRaw: root bone translation of `sequence` at `frame` (1-based, clamped).
     virtual std::optional<Vec3> frame_translation(std::uint32_t sequence, int frame) const = 0;
 };

@@ -34,6 +34,7 @@ std::array<float, 16> instance_transform(const StaticInstance& s) {
 Level::Level(std::vector<std::uint8_t> bin) : bin_(std::move(bin)) {
     std::unordered_map<std::int32_t, std::pair<std::size_t, std::size_t>> by_hash;
     for (auto& entry : parse_bin_archive(Bytes(bin_))) {
+        if (entry.type == EntryType::Script) scripts_.try_emplace(entry.hash, entry.data);
         if (!is_map_chunk_file(entry.type)) continue;
         std::size_t index = chunks_.size();
         if (entry.type == EntryType::Map) {
@@ -65,6 +66,11 @@ Level::Level(std::vector<std::uint8_t> bin) : bin_(std::move(bin)) {
         }
         placements_.push_back({target.first, target.second, instance, instance_transform(s)});
     }
+}
+
+Bytes Level::script(std::uint32_t hash) const {
+    const auto found = scripts_.find(hash);
+    return found == scripts_.end() ? Bytes{} : found->second;
 }
 
 const GfxMesh& Level::mesh(std::size_t chunk, std::size_t model) {

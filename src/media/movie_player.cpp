@@ -1,8 +1,6 @@
 // PSS playback: libavformat demuxes the MPEG-2 program stream (video packet 0xE0), the
 // mpeg2video decoder + swscale produce RGBA frames, and the audio scanner below pulls the Sony
-// private-stream (0xBD) PCM: each PES payload is `ff a0 00 00` + s16le stereo (rate/channels from
-// the first packet's SShd header; its 64 header bytes are skipped). Concatenated payloads decode
-// gapless (track length matches the video duration to a frame).
+// private-stream (0xBD) PCM. The first packet's SShd/SSbd headers describe its layout and size.
 #include "media/movie_player.hpp"
 
 #include <algorithm>
@@ -21,10 +19,10 @@ namespace nf::media {
 
 namespace {
 
-// First audio packet: `ff a0 00 00` + SShd(24: magic, len, ?, rate u32, channels u32, ...) +
-// padding + SSbd; its header bytes carry no samples, so the extractor skips them.
-constexpr std::size_t kFirstPacketSkip = 64;
-constexpr std::uint8_t kSShdMagic[4] = {0x53, 0x53, 0x68, 0x64};
+std::uint32_t read_le32(const std::uint8_t* bytes) {
+    return std::uint32_t(bytes[0]) | std::uint32_t(bytes[1]) << 8 |
+           std::uint32_t(bytes[2]) << 16 | std::uint32_t(bytes[3]) << 24;
+}
 
 struct AudioTrack {
     std::vector<std::int16_t> pcm;  // interleaved s16
@@ -32,8 +30,7 @@ struct AudioTrack {
     std::size_t position = 0;  // samples consumed, always frame-aligned
 };
 
-// Appends every 0xBD payload (minus the 4 sub-stream header bytes) to `out`; reads rate/channels
-// from the first packet's SShd header. Returns false when the layout is not as expected.
+// Channel blocks cross PES packet boundaries. Concatenate the payloads before interleaving samples.
 bool extract_audio(const std::string& path, std::vector<std::int16_t>& out, int& rate, int& channels,
                    std::string& error) {
     std::FILE* f = std::fopen(path.c_str(), "rb");
@@ -52,6 +49,8 @@ bool extract_audio(const std::string& path, std::vector<std::int16_t>& out, int&
     }
     std::fclose(f);
     bool first = true;
+    std::size_t block_bytes = 0, audio_bytes = 0;
+    std::vector<std::uint8_t> samples;
     std::size_t i = 0;
     const std::size_t n = data.size();
     while (i + 16 < n) {
@@ -60,29 +59,45 @@ bool extract_audio(const std::string& path, std::vector<std::int16_t>& out, int&
             const std::size_t hl = data[i + 8];
             const std::size_t pay = i + 9 + hl, plen = len >= 3 + hl ? len - 3 - hl : 0;
             if (pay + plen > n) break;
-            if (plen < 4 || data[pay] != 0xFF || data[pay + 1] != 0xA0) {
+            if (plen < 4 || std::memcmp(&data[pay], "\xFF\xA0\0\0", 4) != 0) {
                 i += 4;
                 continue;
             }
             std::size_t start = pay + 4;
             if (first) {
                 first = false;
-                if (plen < 4 + 24 || std::memcmp(&data[pay + 4], kSShdMagic, 4) != 0) {
+                if (plen < 4 + 8 + 24 + 8 || std::memcmp(&data[start], "SShd", 4) != 0) {
                     error = "missing SShd header";
                     return false;
                 }
-                const std::uint8_t* h = &data[pay + 4];
-                rate = int(h[12] | (h[13] << 8) | (h[14] << 16) | (h[15] << 24));
-                channels = int(h[16] | (h[17] << 8) | (h[18] << 16) | (h[19] << 24));
-                if ((rate != 32000 && rate != 44100 && rate != 48000) || (channels != 1 && channels != 2)) {
-                    error = "implausible SShd rate/channels";
+                const std::uint8_t* h = &data[start];
+                const std::size_t header_bytes = read_le32(h + 4);
+                rate = int(read_le32(h + 12));
+                channels = int(read_le32(h + 16));
+                block_bytes = read_le32(h + 20);
+                if ((rate != 32000 && rate != 44100 && rate != 48000) || (channels != 1 && channels != 2) ||
+                    read_le32(h + 8) != 1 || block_bytes == 0 || block_bytes % 2 != 0 ||
+                    header_bytes < 16 || header_bytes > plen - 4 - 16) {
+                    error = "unsupported SShd PCM layout";
                     return false;
                 }
-                start = pay + kFirstPacketSkip;
+                start += 8 + header_bytes;
+                if (std::memcmp(&data[start], "SSbd", 4) != 0) {
+                    error = "missing SSbd header";
+                    return false;
+                }
+                audio_bytes = read_le32(&data[start + 4]);
+                start += 8;
+                if (audio_bytes == 0 || audio_bytes > n || audio_bytes % (block_bytes * channels) != 0) {
+                    error = "invalid SSbd PCM size";
+                    return false;
+                }
+                samples.reserve(audio_bytes);
             }
-            for (std::size_t p = start; p + 1 < pay + plen; p += 2)
-                out.push_back(std::int16_t(data[p] | (data[p + 1] << 8)));
-            i = pay + plen;
+            const std::size_t take = std::min(pay + plen - start, audio_bytes - samples.size());
+            samples.insert(samples.end(), data.data() + start, data.data() + start + take);
+            if (samples.size() == audio_bytes) break;
+            i += 6 + len;
             continue;
         }
         ++i;
@@ -90,6 +105,19 @@ bool extract_audio(const std::string& path, std::vector<std::int16_t>& out, int&
     if (first) {
         error = "no audio packets";
         return false;
+    }
+    if (samples.size() != audio_bytes) {
+        error = "truncated PSS audio";
+        return false;
+    }
+    out.reserve(audio_bytes / 2);
+    for (std::size_t block = 0; block < audio_bytes; block += block_bytes * channels) {
+        for (std::size_t sample = 0; sample < block_bytes; sample += 2) {
+            for (int channel = 0; channel < channels; ++channel) {
+                const std::size_t at = block + channel * block_bytes + sample;
+                out.push_back(std::int16_t(samples[at] | (samples[at + 1] << 8)));
+            }
+        }
     }
     return true;
 }
@@ -126,6 +154,7 @@ MoviePlayer::~MoviePlayer() = default;
 const std::string& MoviePlayer::error() const { return impl_->error; }
 const MovieVideoInfo& MoviePlayer::video() const { return impl_->video_info; }
 const MovieAudioInfo& MoviePlayer::audio() const { return impl_->audio_info; }
+std::span<const std::int16_t> MoviePlayer::audio_pcm() const { return impl_->audio.pcm; }
 double MoviePlayer::audio_position() const {
     const Impl& s = *impl_;
     if (s.audio.sample_rate <= 0 || s.audio.channels <= 0) return 0;

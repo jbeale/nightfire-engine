@@ -37,7 +37,7 @@ using namespace nf::sp::st;
 class SpSystem;
 
 // Voice line kinds (NDrone2_PatrolTalk / AttackTalk / PainTalk / DeathTalk ...).
-enum class Speech : int { Patrol, Attack, Pain, Death, Surrender, CivilianScared, Other };
+enum class Speech : int { Patrol, Attack, Pain, Death, Surrender, CivilianScared, SeenPlayer, HeardNoise, Other };
 
 // ---- switch channels (`switch_channels` @0x26fc90, 256 bytes; scripts/levels set them) --------------------------
 // No scripting engine exists yet: every channel starts OFF; `WaitSwitch` waits for its channel, spawners and cover
@@ -86,6 +86,7 @@ struct SpExt : drone::DroneExt {
     int partner = -1;                      // Drone+0x2b0: paired drone id (hostage killer <-> hostage), -1 none
     int door_partner = -1;                 // Drone+0x2bc: door-guard partner drone id, -1 none
     int near_drone = -1;                   // Drone+0x2b8: armed enemy drone found by NDrone2_NearArmedDrone
+    int speech_handle = 0;                // Drone+0x4d0: active voice
     int cover_node = -1;                   // claimed cover node index into SpLevel::cover_nodes (-1 none)
     struct AiGoal {                        // AIPoint_tag (Drone+0x6f0): the fixed position goal a state walks to
         bool set = false;                  //   +0x04 valid
@@ -180,15 +181,17 @@ public:
     // NDrone2_SeenAndAttacking (0x145150) bookkeeping: every attacking drone is counted once per frame
     // (NPCGlobals+0x18c, dedup pNPCPassed); Drone_InitComms copies the total to +0x170 for the next frame.
     void note_attacker(Drone& d);                       // the drone callbacks().seen_and_attacking hook
+    void alert_near_spotlight(const Vec3& pos);
     int attackers_prev_frame() const { return attackers_prev_; }   // NPCGlobals+0x170
     int attackers_this_frame() const { return attackers_now_; }
     bool combat_music_active() const { return music_active_; }
-    std::function<void(Drone&, Speech)> speech;         // voice line hook (audio); null = silent
+    void speak(Drone& d, Speech kind);
+    void speak_line(Drone& d, int line);
     std::function<void()> on_combat_music;              // Music_Event(2, 5): the arena/audio hook
     bool alarm_raised = false;            // NPCGlobals+0x1c76 (level 0x7000007 alarm: drones widen their sight)
     // Hooks of the civilian / mission layer (sp_civilian_util.hpp); all optional, null = the effect is not presented.
     //   on_mission_fail  DroneFunc_SetMissionFailReason (0x13e560): (drone, reason 1..0x10, fail label 0x4000033/34 or 0)
-    //   on_sfx           NDrone2_PlaySFX / SpeechSFX: (drone, Drone_SfxInfo id) -> sound handle (0 = nothing played)
+    //   on_sfx           NDrone2_PlaySFX / SpeechSFX: (drone, SFX asset id) -> sound handle (0 = nothing played)
     //   sfx_finished     Sound_IsFinnished(handle)
     //   on_music_event   Music_Event(event, arg)     on_text  Text_AddMsg(label)
     std::function<void(Drone&, int reason, std::uint32_t label)> on_mission_fail;
@@ -217,6 +220,8 @@ private:
     std::unique_ptr<CoverSystem> cover_;
     std::vector<std::unique_ptr<SpawnerRuntime>> spawners_;
     std::size_t spawned_ = 0;
+    std::uint32_t next_patrol_speech_ = 0;
+    std::array<std::uint32_t, kDroneSpeechCount> next_speech_{};
     int attackers_now_ = 0, attackers_prev_ = 0;
     std::vector<int> passed_;                // pNPCPassed: drone ids already counted this combat
     bool music_active_ = false;              // MusicVars+0xc
@@ -247,8 +252,7 @@ void consider_explosive(Drone& d, const Msg& m, int default_state);
 // All four in the order the Idle/Alert/Patrol states use them; true when consumed.
 bool skel_common(Drone& d, const Msg& m, int impact_default_state = kStAttack);   // impact, alerts, forced attack, explosive
 
-// Voice lines (NDrone2_PatrolTalk / AttackTalk / PainTalk / DeathTalk / ...): the audio hook installed by main
-// (`SpSystem::speech`) picks the sfx; states call `talk` where the original calls the *Talk function.
+// Voice lines (NDrone2_PatrolTalk / AttackTalk / PainTalk / DeathTalk / ...).
 void talk(Drone& d, Speech what);
 
 // NDrone2_Enable(flag, drone) 0x14a?: false = hide + no collision + clear the active flags (&= 0xffe7fe5f), true =

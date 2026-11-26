@@ -92,6 +92,8 @@ MpDirect MpSession::from_launch(const MpLaunch& launch) {
     d.bot_characters = chars;
     d.options.time_limit = float(launch.settings.duration);
     d.options.friendly_fire = launch.settings.friendly_fire != 0;
+    d.options.explosive_scenery = launch.settings.explosive_scenery != 0;
+    d.options.mini_vehicles = launch.settings.mini_vehicles;
     d.options.weapon_set = launch.settings.weapon_set;
     return d;
 }
@@ -311,6 +313,12 @@ struct MpSession::Impl {
         l.position = p.eye();
         l.dir = {std::sin(p.yaw) * c, std::sin(p.view_pitch()), std::cos(p.yaw) * c};
         l.norm = {std::cos(p.yaw), 0.0f, -std::sin(p.yaw)};
+        if (const auto tank = session->mini_tanks().view(0)) {
+            l.position = tank->eye;
+            l.dir = tank->direction;
+            l.norm = normalised(cross(Vec3{0, 1, 0}, l.dir));
+            l.up = cross(l.dir, l.norm);
+        }
         audio->set_listener(l);
         music->update();
         audio->update();
@@ -493,6 +501,12 @@ struct MpSession::Impl {
         const int humans = session->humans();
         int width = 0, height = 0;
         window.begin_frame(width, height);
+        renderer->set_hidden_placements(session->scenery_hides());
+        std::vector<LevelRenderer::ObjectDraw> scenery_draws;
+        for (const Placement& wreck : session->scenery_wrecks())
+            scenery_draws.push_back({wreck.chunk, wreck.model, wreck.transform});
+        for (const Placement& car : session->cable_cars())
+            scenery_draws.push_back({car.chunk, car.model, car.transform});
         glDisable(GL_SCISSOR_TEST);
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -510,6 +524,7 @@ struct MpSession::Impl {
             if (!view_player) continue;
             const Player& p = *view_player;
             Camera cam = camera_for_eye_yaw_pitch(p.eye(), p.yaw, p.view_pitch());
+            const auto tank_view = session->mini_tanks().view(i);
             float zoom = session->weapons().zoom(i);
             if (network && i >= int(network->slot()) &&
                 i < int(network->slot() + network->local_players())) {
@@ -518,12 +533,21 @@ struct MpSession::Impl {
                     zoom = previous_viewmodels[local].zoom + (zoom - previous_viewmodels[local].zoom) * interpolation;
             }
             cam.fovy = kViewFovY / std::max(1.0f, zoom);
+            if (tank_view) {
+                const Vec3& dir = tank_view->direction;
+                cam = {tank_view->eye, std::atan2(-dir[0], -dir[2]), std::asin(std::clamp(dir[1], -1.0f, 1.0f)), kViewFovY};
+            }
             glViewport(r.x, gl_y, r.w, r.h);
             glScissor(r.x, gl_y, r.w, r.h);
             const auto clear = renderer->clear_color();
             glClearColor(clear[0], clear[1], clear[2], 1);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             renderer->draw(cam, r.aspect(), false);
+            if (!scenery_draws.empty()) renderer->draw_objects(cam, r.aspect(), scenery_draws);
+            std::vector<LevelRenderer::ObjectDraw> tank_draws;
+            for (const Placement& tank : session->mini_tanks().draw_placements(i))
+                tank_draws.push_back({tank.chunk, tank.model, tank.transform});
+            if (!tank_draws.empty()) renderer->draw_objects(cam, r.aspect(), tank_draws);
             if (weather && weather->active()) weather->draw(cam, renderer->view_projection(cam, r.aspect()));
             // Bots, remote players, then effects and the viewer's own gun.
             if (drone_renderer && bot_match)
@@ -552,7 +576,7 @@ struct MpSession::Impl {
                 vm.muzzle_flash = previous.muzzle_flash +
                                   (vm.muzzle_flash - previous.muzzle_flash) * interpolation;
             }
-            if (vm.visible && vm.skin && vm.anim) {
+            if (!tank_view && vm.visible && vm.skin && vm.anim) {
                 const WeaponDef& def = session->weapons().table().weapon(vm.weapon);
                 const Vec3 muzzle =
                     weapon_view->draw(cam, r.aspect(), vm, def, effects->lighting_at(cam.eye, 2.0f),
@@ -568,6 +592,12 @@ struct MpSession::Impl {
             // Local play has a HUD per human slot; a network client one per local player (its views are the
             // consecutive global slots from network->slot()).
             const std::size_t h = network ? std::size_t(view) : std::size_t(i);
+            if (huds[h]->enabled(HudPane::RcCar) != bool(tank_view)) huds[h]->enable(HudPane::RcCar, bool(tank_view));
+            if (tank_view) {
+                hs.player_state = int(SubState::Car);
+                hs.cam_mode = std::uint8_t(p.cam_mode());
+                hs.vehicle_counts = {tank_view->rockets, tank_view->heat};
+            }
             for (const PendingMessage& pm : pending_messages) {
                 if (pm.message.slot != -1 && pm.message.slot != i) continue;
                 huds[h]->add_message(HudMessage{static_cast<HudMsgType>(int(pm.message.type)), 0xFFFFFFFF,
@@ -710,6 +740,12 @@ struct MpSession::Impl {
         if (debrief) {
             background.emplace(ctx.gamedir);
             background->advance();
+        } else {
+            draw_views();
+            int w, h;
+            window.begin_frame(w, h);
+            const GameView view = game_view(config, w, h);
+            ui.capture_backdrop(view.x, h - view.y - view.h, view.w, view.h);
         }
         PadHistory hist;
         bool wait_release = true;
@@ -733,6 +769,7 @@ struct MpSession::Impl {
             window.begin_frame(w, h);
             ui.begin(w, h);
             if (background) background->draw(ui);
+            else ui.draw_backdrop();
             ui::select_prompts(pauser, InputContext::Menu);
             menu.draw(ui, text);
             ui.end();

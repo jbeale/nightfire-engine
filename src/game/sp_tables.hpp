@@ -27,6 +27,7 @@ using nf::drone::Behaviour;
 constexpr std::uint32_t kDroneTypeSettingsAddr = 0x29aee8, kDroneModeSettingsAddr = 0x29ad40;
 constexpr std::uint32_t kBitDescsAddr = 0x2c7250, kBitMasksAddr = 0x2c7308, kStatWidthsAddr = 0x303330;
 constexpr int kDtypeCount = 85, kDmodeCount = 35;
+constexpr int kDroneSpeechCount = 0x15a;
 
 struct DroneTypeEntry {            // DroneTypeSettings row
     std::int16_t initial_state;    // -1 = computed (NDrone2_DoTypeSettingsOLD / GetDroneTypeAttackTypeFriend)
@@ -48,6 +49,11 @@ struct BehaviourOp {
 };
 constexpr int kCallDefaults = -1;
 
+struct DroneSpeech {
+    std::uint32_t effect = 0;
+    std::uint32_t cooldown = 0;       // 60 Hz frames
+};
+
 class SpTables {
 public:
     static SpTables load(const nf::Elf32& action_elf);
@@ -57,6 +63,7 @@ public:
     std::array<std::uint8_t, Behaviour::kCount * 2> bit_descs{};   // bitDescs: {word|shift<<3, mask index}
     std::array<std::uint32_t, 35> bit_masks{};
     std::array<std::uint32_t, 8> stat_widths{};                    // 8,3,8,8,5,8,8,1 (behaviour_util_get)
+    std::array<DroneSpeech, kDroneSpeechCount> speech{};
     // Program of each DMODE init function (ordered ops); Defaults is expanded by apply_dmode_init.
     std::array<std::vector<BehaviourOp>, kDmodeCount> dmode_init{};
     std::vector<BehaviourOp> dmode_defaults;
@@ -88,7 +95,7 @@ struct SpNpcSpec {
     std::uint8_t alt_channel = 0;       // key 6 (byte)
     std::uint32_t key7 = 0;             // key 7 -> Drone+0x148
     std::uint32_t alt_mode = 0x65;      // key 8 (u16)
-    std::uint32_t voice_set = 0;        // key 9 (u16): weapon/ammo set (+0xbbc/+0xbbe, +0xda group, +0x100)
+    std::uint32_t voice_set = 0;        // key 9 (u16): weapon/ammo set (collbody+0x62, +0xbbc/+0xbbe, +0xda, +0x100)
     std::uint32_t variant = 0;          // key 10 -> Drone+0x45
     std::uint32_t kit = 0;              // key 11: head/armour kit (>>4 = kit, low nibble = colour)
     std::uint32_t key12 = 0;            // key 12 -> Drone+0x13c
@@ -155,6 +162,7 @@ struct NpcResolved {
     bool fire_locked = false;            // +0x3e
     std::uint8_t variant = 0;            // +0x45
     // weapon set
+    int weapon = 1;                       // collbody+0x62: normalized key 9
     std::uint16_t ammo = 0, ammo_max = 0;   // +0xbbc / +0xbbe
     float bullet_damage_mod = 1.0f;      // +0x100
     std::uint16_t kit = 0, kit_colour = 0;   // +0xbcc / +0xbce

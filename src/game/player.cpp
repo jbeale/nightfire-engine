@@ -481,7 +481,11 @@ void Player::resolve_collisions(const CollisionWorld& world) {
         return;
     }
     const Vec3 up = orientation()[1];
-    const FeetResult feet = world.feet_on_point(pos, result.b, up, stand_height, result.contact);
+    FeetResult feet = world.feet_on_point(pos, result.b, up, stand_height, result.contact);
+    if (const auto* moving = object_world_ ? object_world_->moving_meshes() : nullptr) {
+        auto platform = moving->feet_on_point(pos, result.b, up, stand_height, result.contact);
+        if (platform.ground && (!feet.ground || platform.ground->dist < feet.ground->dist)) feet = platform;
+    }
     // Player_FeetOnPoint's ray hits script solids too: with no static floor, a mover top
     // under the sole still grounds the player (the 4a lift platform has no static collision).
     const Vec3 sole = {pos[0] - up[0] * stand_height, pos[1] - up[1] * stand_height,

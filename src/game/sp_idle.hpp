@@ -19,8 +19,8 @@ struct IdleSlot : SlotBase {
 bool stand_idle_anim(Drone& d, bool timed);
 bool walk_idle_anim(Drone& d, bool timed);
 
-// NDrone2_ObjectIsArmed(player): the opponent (the player) holds a weapon - always true for the SP player.
-inline bool opponent_armed(const Drone& d) { return d.opponent.valid(); }
+// NDrone2_ObjectIsArmed: checks the currently drawn weapon, including armed gadget variants.
+bool opponent_armed(const Drone& d);
 
 // NDrone2_UpdatePatrolRoute (follow the patrol route + walk / idle animation by route status).
 int update_patrol_route(Drone& d);

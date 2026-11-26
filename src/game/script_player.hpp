@@ -7,11 +7,8 @@
 // `Host` (implemented by `game/mission.hpp`'s mission system) so this stays free of audio/UI/AI
 // dependencies. Only the effects the level scripts use are modelled; the rest is noted per site.
 //
-// Key mapping (partly inferred): the camera stream plays the key range of its `CameraStart`
-// payload when both indices are valid, otherwise the whole track; entities always play the whole
-// track mapped onto their active window. Times are key +44 seconds-frames; positions lerp,
-// quaternions slerp, spline mode uses Catmull-Rom. [INFERENCE: exact key ranges and the spline
-// weights of `Script_CalculateSpline` were not reversed; flag for an nfmips differential test.]
+// Cameras use the range in CameraStart. Entity streams use their directory's inclusive key
+// range. Positions lerp or use Catmull-Rom, rotations slerp, and key times are 60 Hz frames.
 
 #include <array>
 #include <cstdint>
@@ -38,29 +35,25 @@ public:
         virtual void load_level(std::uint32_t id) = 0;
         virtual void set_scriptcam(std::uint32_t id) = 0;
         virtual void camera_mode(std::uint32_t mode) = 0;
-        virtual void disable_player(bool disable) = 0;
         virtual void ram_save() = 0;
         virtual void text(std::uint32_t label, std::uint16_t frames) = 0;
-        virtual void sound(std::uint32_t id, const std::array<float, 3>& pos, bool positional) = 0;
         virtual void fade(float seconds) = 0;
         virtual void music(std::uint32_t id, std::int32_t value) = 0;
         virtual void message_callback(std::uint16_t arg, std::uint32_t data) = 0;
     };
 
-    // A sounded/text/faded/music event for the owner to present (sounds/messages are also
-    // delivered through Host; these queues let headless runs inspect them).
+    struct ActorPose {
+        std::uint32_t skin = 0, script = 0;
+        float frame = 1;
+    };
+    enum class SoundAction { Start, Move, End };
     struct Sound {
         std::uint32_t id = 0;
         std::array<float, 3> pos{};
         bool positional = false;
-    };
-    struct Message {
-        std::uint32_t label = 0;
-        std::uint16_t frames = 0;
-    };
-    struct Music {
-        std::uint32_t id = 0;
-        std::int32_t value = 0;
+        SoundAction action = SoundAction::Start;
+        std::uint16_t stream = 0;
+        ActorPose actor{};
     };
     // `Script_LightStart` lights (`DynamicLights::create`): entity position, intensity byte [1],
     // type flag (byte [2] == 1); radius 255, colour constants, infinite life (Characters-2).
@@ -76,17 +69,19 @@ public:
     void play(bool fast);  // `Script_Play`: fast = skip-timescale (`Script_FFwd`)
     void stop();           // `Script_Stop`
     bool playing() const { return playing_; }
+    bool locks_player() const { return playing_ && locks_player_; }
+    bool locks_drones() const { return playing_ && locks_drones_; }
     float time() const { return time_; }  // SCRIPTINFO+160, 60 Hz frames
 
     // Advances every stream by `frames` (60 Hz frames; one 30 Hz tick = 2.0).
     void tick(float frames);
 
     // Script-camera override (`ScriptCam` + `Script_UpdateCamera`): eye and forward when a camera
-    // stream is active, plus the +32/+36 key floats (fov-ish, first when sane).
+    // stream is active, with the +32 lens value projected for the original 4:3 view.
     struct Camera {
         std::array<float, 3> eye{};
         std::array<float, 3> forward{0, 0, 1};
-        float fov = 60.0f;
+        float fov = 1.0471976f;  // vertical radians
     };
     std::optional<Camera> camera() const;
 
@@ -99,9 +94,17 @@ public:
     };
     std::vector<EntityPose> entities() const;
 
+    std::vector<ActorPose> actors() const;
+
+    // Script_Free passes the saved matrix and mode to Player_Enable.
+    struct PlayerHandoff {
+        Vec3 position{};
+        float yaw = 0;
+        std::uint8_t mode = 0;
+    };
+    std::optional<PlayerHandoff> take_handoff();
+
     std::vector<Sound> take_sounds();
-    std::vector<Message> take_messages();
-    std::vector<Music> take_music();
     std::vector<Light> take_lights();
 
 private:
@@ -113,6 +116,7 @@ private:
     float key_time(std::size_t i) const;
     float key_aux(std::size_t i) const;  // +32 float (fov / aux channel)
     std::size_t key_count() const;
+    void cue_sound(Stream& stream, SoundAction action);
 
     const CutsceneBin* bin_;
     std::uint32_t id_;
@@ -124,12 +128,16 @@ private:
         bool done = false;
         // Entity state (+16/+32/+34/+36/+37 equivalents).
         bool has_entity = false;
+        std::size_t entity_first = 0, entity_last = 0;
         std::uint32_t entity_hash = 0;
         float entity_start = 0;  // stream time of EntityStart
         bool spline = false;     // +34 == 2
         int obj_ref = -1;        // +37: entity index other streams address (-1 none)
         std::array<float, 3> epos{};              // interpolated pose (`Script_GetInterp`)
         std::array<float, 4> equat{0, 0, 0, 1};  // (identity = rest pose before first tick)
+        ActorPose actor;
+        std::uint32_t sound_id = 0;
+        int sound_source = -1;
         // Camera state.
         bool has_camera = false;
         std::size_t key_begin = 0, key_end = 0;
@@ -142,9 +150,10 @@ private:
     float time_ = 0;  // +160
     float end_time_ = 0;
     bool playing_ = false;
+    bool locks_player_ = false;
+    bool locks_drones_ = false;
+    std::optional<PlayerHandoff> handoff_;
     std::vector<Sound> sounds_;
-    std::vector<Message> messages_;
-    std::vector<Music> music_;
     std::vector<Light> lights_;
 };
 

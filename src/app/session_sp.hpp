@@ -1,8 +1,7 @@
 // Single-player ACTION session of the `nightfire` app: the mission's level
 // with the player, weapons, placed NPCs (SpSystem over DroneSystem), HUD,
-// audio (SFX + music) and the pause / end-mission pages. Mission success has
-// no trigger yet (Scripting owns the mission flow); the session ends on
-// player death, a mission-fail hook, pause restart/quit, or window close.
+// audio (SFX + music) and the pause / end-mission pages. A scripted exit can
+// return the next section and the inventory to carry into it.
 #pragma once
 
 #include <memory>
@@ -10,6 +9,7 @@
 #include <string>
 
 #include "app/app.hpp"
+#include "game/mission.hpp"
 #include "render/window.hpp"
 #include "ui/frontend.hpp"
 #include "ui/hud.hpp"
@@ -24,6 +24,8 @@ struct SpLaunch {
     // Debug channel presets (nfgame --channel): applied to the mission switch channels at start.
     std::vector<std::pair<int, int>> channels;
     int give = -1;  // debug equip (nightfire --give ID): give + select at start (< 0 = loadout only)
+    MissionSystem::Inventory inventory{};
+    std::uint16_t entry_channel = 0;
 };
 
 enum class SpExit {
@@ -37,6 +39,8 @@ struct SpResult {
     bool failed = false;  // death or the mission-fail hook fired
     bool won = false;     // MissionSystem reported Succeeded
     std::uint32_t next_level = 0;  // sp_level id after a win (0x070000xx ACTION, 0x0900000x driving, 0 = frontend)
+    MissionSystem::Inventory inventory{};
+    std::uint16_t entry_channel = 0;
 };
 
 struct SpHeadless {

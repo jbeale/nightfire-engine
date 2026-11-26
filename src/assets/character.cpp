@@ -630,6 +630,8 @@ CharacterBank::CharacterBank(std::vector<std::uint8_t> world_bin, std::vector<st
         } else if (e.type == EntryType::Skeleton) {
             Skeleton s = parse_skeleton(e.data);
             skeletons_.emplace(s.id, std::move(s));
+        } else if (e.type == EntryType::Script) {
+            cutscenes_.try_emplace(e.hash, e.data);
         }
     }
     for (const auto& e : entries) {
@@ -763,7 +765,6 @@ const SkinnedMesh& CharacterBank::skinned_mesh(ModelRef r) {
             if (blocks[i].data.data() == model(r).gfx.data() && blocks[i - 1].id == std::uint8_t(BlockId::MorphData))
                 morph = blocks[i - 1].data;
         slot = std::make_unique<SkinnedMesh>(decode_skinned_gfx(model(r).gfx, morph));
-        slot->envmap = model_envmapped(model(r));
     }
     return *slot;
 }

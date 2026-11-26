@@ -37,7 +37,9 @@ namespace sp {
 class SpSystem;
 }
 class WeaponSystem;
-struct StringTable;
+class CharacterBank;
+class CharacterInstance;
+class StringTable;
 
 class MissionSystem : public System, public CutscenePlayer::Host {
 public:
@@ -64,7 +66,8 @@ public:
 
     // Object updates that must run BEFORE the players collide (movers for this tick).
     // `use` = per-slot Cross pressed; call once per tick before `World::tick`.
-    void pre_tick(World& world, const std::vector<bool>& use);
+    void pre_tick(World& world, const std::vector<bool>& use, FrameTiming timing = FrameTiming{},
+                  const WeaponEvents* previous_weapon_events = nullptr);
 
     void tick(World& world, FrameTiming timing) override;
 
@@ -74,11 +77,11 @@ public:
     float fade() const { return fade_; }
     // Script-camera override for the renderer (eye + forward + fov), when a camera runs.
     std::optional<CutscenePlayer::Camera> script_camera() const;
+    std::vector<CutscenePlayer::ActorPose> script_actors() const;
+    void set_character_bank(CharacterBank* bank) { character_bank_ = bank; }
     // Queued presentation (also delivered through Hooks): sounds, texts, music, drone spawns.
-    struct Sound {
-        std::uint32_t id = 0;
-        Vec3 pos{};
-        bool positional = false;
+    struct Sound : CutscenePlayer::Sound {
+        std::size_t script_instance = 0;
     };
     struct Text {
         std::uint32_t label = 0;
@@ -131,7 +134,9 @@ public:
     };
     void apply_loadout(int slot);
     Inventory ram_save(int slot) const;
-    void ram_load(int slot, const Inventory& inv);
+    void ram_load(World& world, int slot, const Inventory& inv);
+    std::uint16_t exit_channel() const { return objects_->exit_channel(); }
+    const Inventory& carried_inventory() const { return carried_inventory_; }
 
     // Mission stats (`PlrStat_*` essence): frames, shots, hits, kills (drones report via Bots).
     struct Stats {
@@ -158,10 +163,8 @@ public:
     void load_level(std::uint32_t id) override;
     void set_scriptcam(std::uint32_t id) override;
     void camera_mode(std::uint32_t mode) override;
-    void disable_player(bool disable) override;
     void ram_save() override;
     void text(std::uint32_t label, std::uint16_t frames) override;
-    void sound(std::uint32_t id, const std::array<float, 3>& pos, bool positional) override;
     void fade(float seconds) override;
     void music(std::uint32_t id, std::int32_t value) override;
     void message_callback(std::uint16_t arg, std::uint32_t data) override;
@@ -170,6 +173,7 @@ private:
     void monitor_objectives();
     void update_state(FrameTiming timing);
     void play_script(std::uint32_t hash);
+    void update_moving_geometry(World& world);
 
     Level& level_;
     std::uint32_t level_id_ = 0;
@@ -187,18 +191,28 @@ private:
     State state_ = State::Playing;
     std::uint32_t fail_label_ = 0;
     std::uint32_t pending_level_ = 0;
+    Inventory carried_inventory_;
     float state_timer_ = 0;  // 60 Hz frames left in Succeeded/Failed before Done
     float fade_ = 0, fade_target_ = 0, fade_rate_ = 0;
     std::uint32_t scriptcam_ = 0;
     bool player_disabled_ = false;
+    bool drones_disabled_ = false;
+    bool spotlight_contact_ = false;
+    std::vector<int> suspended_drones_;
+    std::optional<CutscenePlayer::PlayerHandoff> player_handoff_;
     std::vector<std::pair<std::uint32_t, CutsceneBin>> scripts_;
     std::vector<std::unique_ptr<CutscenePlayer>> players_;
+    CharacterBank* character_bank_ = nullptr;
+    std::unique_ptr<CharacterInstance> truck_;
+    std::optional<CutscenePlayer::ActorPose> parked_truck_pose_;
+    std::optional<std::size_t> truck_handle_;
+    CollisionWorld* moving_geometry_ = nullptr;
+    std::vector<std::size_t> door_handles_;
     std::vector<Sound> sounds_;
     std::vector<Text> texts_;
     std::vector<Music> music_;
     std::vector<Spawn> spawns_;
     std::vector<Light> lights_;
-    World* world_ = nullptr;  // valid during tick() for player disable/enable
     std::vector<ChannelEvent> channel_log_;
     std::array<std::uint8_t, 256> channel_watch_{};
     bool watch_init_ = false;

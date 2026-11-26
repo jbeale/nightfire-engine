@@ -499,6 +499,7 @@ struct CollisionWorld::Item {
 };
 
 CollisionWorld::CollisionWorld(Level& level) : CollisionWorld(level, std::nullopt) {}
+CollisionWorld::CollisionWorld() = default;
 
 CollisionWorld CollisionWorld::of_objects(Level& level, std::span<const std::uint32_t> classes) {
     return CollisionWorld(level, classes);
@@ -522,28 +523,58 @@ CollisionWorld::CollisionWorld(Level& level, std::optional<std::span<const std::
         if (model.collision.empty()) continue;
         auto& slot = cache[{p.chunk, p.model}];
         if (!slot) slot = std::make_shared<const Collision>(parse_collision(model.collision));
-        if (slot->boxes.empty() || slot->tris.empty()) continue;
-
-        Item item;
-        item.placement = i;
-        item.coll = slot;
-        item.model = p.transform;
-        if (!invert_affine(item.model, item.inverse)) continue;
-        const CollisionBox& root = slot->boxes.front();
-        constexpr float inf = std::numeric_limits<float>::infinity();
-        item.wmin = {inf, inf, inf};
-        item.wmax = {-inf, -inf, -inf};
-        for (int corner = 0; corner < 8; ++corner) {
-            const Vec3 q = {corner & 1 ? root.max[0] : root.min[0], corner & 2 ? root.max[1] : root.min[1],
-                            corner & 4 ? root.max[2] : root.min[2]};
-            const Vec3 w = transform_point(item.model, q);
-            for (int k = 0; k < 3; ++k) {
-                item.wmin[k] = std::min(item.wmin[k], w[k]);
-                item.wmax[k] = std::max(item.wmax[k], w[k]);
-            }
-        }
-        items_.push_back(std::move(item));
+        add_solid(i, p.transform, slot);
     }
+}
+
+void CollisionWorld::add_solid(std::size_t placement, const Mat4& transform, std::shared_ptr<const Collision> collision) {
+    if (collision->boxes.empty() || collision->tris.empty()) return;
+    Item item;
+    item.placement = placement;
+    item.coll = std::move(collision);
+    if (set_transform(item, transform)) items_.push_back(std::move(item));
+}
+
+bool CollisionWorld::set_transform(Item& item, const Mat4& transform) {
+    if (!invert_affine(transform, item.inverse)) return false;
+    item.model = transform;
+    const CollisionBox& root = item.coll->boxes.front();
+    constexpr float inf = std::numeric_limits<float>::infinity();
+    item.wmin = {inf, inf, inf};
+    item.wmax = {-inf, -inf, -inf};
+    for (int corner = 0; corner < 8; ++corner) {
+        const Vec3 q = {corner & 1 ? root.max[0] : root.min[0], corner & 2 ? root.max[1] : root.min[1],
+                        corner & 4 ? root.max[2] : root.min[2]};
+        const Vec3 w = transform_point(item.model, q);
+        for (int k = 0; k < 3; ++k) {
+            item.wmin[k] = std::min(item.wmin[k], w[k]);
+            item.wmax[k] = std::max(item.wmax[k], w[k]);
+        }
+    }
+    return true;
+}
+
+void CollisionWorld::set_object_model(const Level& level, std::size_t placement, std::size_t model) {
+    std::erase_if(items_, [placement](const Item& item) { return item.placement == placement; });
+    const Placement& p = level.placements().at(placement);
+    add_model(level, placement, p.chunk, model, p.transform);
+}
+
+void CollisionWorld::add_model(const Level& level, std::size_t handle, std::size_t chunk, std::size_t model,
+                               const Mat4& transform) {
+    const Bytes data = level.chunks().at(chunk).chunk.models.at(model).collision;
+    if (!data.empty()) add_solid(handle, transform, std::make_shared<const Collision>(parse_collision(data)));
+}
+
+void CollisionWorld::move_model(std::size_t handle, const Mat4& transform) {
+    for (Item& item : items_)
+        if (item.placement == handle) { set_transform(item, transform); return; }
+}
+
+Vec3 CollisionWorld::carry_point(std::size_t handle, const Mat4& next, const Vec3& point) const {
+    for (const Item& item : items_)
+        if (item.placement == handle) return transform_point(next, transform_point(item.inverse, point));
+    return point;
 }
 
 CollisionWorld::~CollisionWorld() = default;

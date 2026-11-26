@@ -91,11 +91,13 @@ struct Model {
     std::uint32_t flags;             // celglist+0x44: draw flags, see ModelFlag
     Bytes gfx;                       // PS2_GFX block (may be a 0x20-byte stub with no geometry)
     Bytes collision;                 // coll_data_new block, empty if the model has none
+    std::int32_t linked_lod = -1;     // block 0x27: model index, also used as a destroyed variant
 };
 
 // StaticInstance::flags low 16 bits: 0x8000 = world cel (built by parsemap_block_map_data_static);
 // otherwise the object class dispatched by parsemap_create_dynamic_objects.
 constexpr std::uint32_t kClassSky = 0x2A;  // View_AddSkyObj; params 0 slot, 1 flash, 2/3 timers, 4 layer
+constexpr std::uint32_t kClassDestroyable = 0xE1;  // Destroy_Create
 // Object classes (parsemap_create_dynamic_objects) whose Create handlers build gameplay, trigger,
 // volume, light or weather state and never attach the placement's marker mesh to a draw list, so the
 // static world pass must not draw them. Visible classes (doors 0xDB, trees 0xF3, pickups 0xF0, coronas

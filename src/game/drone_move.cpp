@@ -96,9 +96,10 @@ bool assign_ai_path(Drone& d, std::uint32_t path_mask) {
     return d.nav->assign_ai_path(d.nav_pos(), d.sys->nav()->find_cel(d.nav_pos()), path_mask);
 }
 
-int follow_ai_path(Drone& d) {
+int follow_ai_path(Drone& d, NodeRef* reached) {
     if (!d.nav) return int(RouteStatus::NoPath);
     NavMove m = d.nav->follow_ai_path(d.nav_pos());
+    if (reached) *reached = m.reached_node;
     publish_move(d, m);
     return int(m.status);
 }

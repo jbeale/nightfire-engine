@@ -92,16 +92,30 @@ Camera camera_for(const View& prev, const View& cur, float alpha) {
     return cam;
 }
 
+Camera match_camera(const ArenaSession& session, int slot, const View& prev, const View& cur, float alpha) {
+    if (const auto tank = session.mini_tanks().view(slot)) {
+        const auto& dir = tank->direction;
+        return {tank->eye, std::atan2(-dir[0], -dir[2]), std::asin(std::clamp(dir[1], -1.0f, 1.0f)), kViewFovY};
+    }
+    return camera_for(prev, cur, alpha);
+}
+
 // The drawable state of the match's control objects: pickups (spinning about their up axis) and objective items.
 class ObjectDrawList {
 public:
-    ObjectDrawList(Level& level, const ArenaSystem& arena) : level_(level), arena_(arena) {
+    ObjectDrawList(Level& level, const ArenaSession& session) : arena_(session.arena()), session_(session) {
         by_instance_.resize(level.map()->chunk.statics.size(), nullptr);
         for (const Placement& p : level.placements()) by_instance_[p.instance] = &p;
     }
 
     std::vector<LevelRenderer::ObjectDraw> collect(int viewer) const {
         std::vector<LevelRenderer::ObjectDraw> out;
+        for (const Placement& wreck : session_.scenery_wrecks())
+            out.push_back({wreck.chunk, wreck.model, wreck.transform});
+        for (const Placement& car : session_.cable_cars())
+            out.push_back({car.chunk, car.model, car.transform});
+        for (const Placement& tank : session_.mini_tanks().draw_placements(viewer))
+            out.push_back({tank.chunk, tank.model, tank.transform});
         for (const Pickup& p : arena_.pickups().all()) {
             if (!p.available() || p.model_chunk == SIZE_MAX) continue;
             // Pickup_Update spins the object matrix about its own Y axis: linear part * Ry(spin).
@@ -127,9 +141,11 @@ public:
         return out;
     }
 
+    const std::vector<std::size_t>& hides() const { return session_.scenery_hides(); }
+
 private:
-    Level& level_;
     const ArenaSystem& arena_;
+    const ArenaSession& session_;
     std::vector<const Placement*> by_instance_;
 };
 
@@ -144,6 +160,7 @@ void draw_views(Window& window, LevelRenderer& renderer, const ObjectDrawList& o
                 float interpolation = 1.0f) {
     int width, height;
     window.begin_frame(width, height);
+    renderer.set_hidden_placements(objects.hides());
     const auto clear = renderer.clear_color();
     glDisable(GL_SCISSOR_TEST);
     glClearColor(0, 0, 0, 1);
@@ -306,11 +323,11 @@ int run_match(const MatchLaunch& request) {
         WeatherRenderer& weather = *shot_weather;
         std::unique_ptr<drone::DroneRenderer> drone_renderer;
         if (bot_match) drone_renderer = std::make_unique<drone::DroneRenderer>(bot_match->bank());
-        ObjectDrawList objects(level, arena);
+        ObjectDrawList objects(level, session);
         std::vector<Camera> cameras;
         for (int i = 0; i < options.humans; ++i) {
             const View v = view_of(*world.player(i));
-            cameras.push_back(camera_for(v, v, 0.0f));
+            cameras.push_back(match_camera(session, i, v, v, 0.0f));
         }
         // --cam x y z yaw pitch / --follow-bot N: a free screenshot camera in the first viewer.
         if (launch.has_cam) {
@@ -343,7 +360,7 @@ int run_match(const MatchLaunch& request) {
     renderer.set_level(level_id);
     WeatherRenderer weather(level);
     weather.set_level(level_id);
-    ObjectDrawList objects(level, arena);
+    ObjectDrawList objects(level, session);
     std::unique_ptr<drone::DroneRenderer> drone_renderer;
     if (bot_match) drone_renderer = std::make_unique<drone::DroneRenderer>(bot_match->bank());
     DroneDraw drone_draw;
@@ -397,7 +414,9 @@ int run_match(const MatchLaunch& request) {
             report();
         }
         std::vector<Camera> cameras;
-        for (int i = 0; i < options.humans; ++i) cameras.push_back(camera_for(prev[std::size_t(i)], view_of(*world.player(i)), float(accumulator / kStep)));
+        for (int i = 0; i < options.humans; ++i)
+            cameras.push_back(match_camera(session, i, prev[std::size_t(i)], view_of(*world.player(i)),
+                                           float(accumulator / kStep)));
         draw_views(window, renderer, objects, cameras, options.side_by_side, wireframe, drone_draw, &weather,
                    float(accumulator / kStep));
         window.swap();

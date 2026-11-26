@@ -9,7 +9,9 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <map>
 #include <sstream>
+#include <utility>
 
 #include "assets/bin_archive.hpp"
 #include "assets/character.hpp"
@@ -92,6 +94,7 @@ struct SpSession::Impl {
     std::unique_ptr<WeatherRenderer> weather;
     std::unique_ptr<CharacterRenderer> chars;
     std::unique_ptr<WeaponView> weapon_view;
+    std::map<std::pair<std::uint32_t, std::uint32_t>, std::unique_ptr<CharacterInstance>> script_characters;
     std::unique_ptr<drone::DroneRenderer> drone_renderer;
     ViewModel previous_viewmodel{};
     MenuFile level_menu;
@@ -100,6 +103,13 @@ struct SpSession::Impl {
     std::unique_ptr<SoundArchive> archive;
     std::unique_ptr<audio::AudioSystem> audio;
     std::unique_ptr<audio::MusicDirector> music;
+    struct ScriptSound {
+        audio::SfxHandle handle = 0;
+        std::int32_t tag = 0;
+    };
+    std::map<std::pair<std::size_t, std::uint16_t>, ScriptSound> script_sounds;
+    std::int32_t next_script_sound_tag = 1;
+    float step_distance = 0.0f;
     SDL_Gamepad* gamepad = nullptr;
     LocalPad pad{true, nullptr};
 
@@ -143,12 +153,17 @@ struct SpSession::Impl {
         params.health.damage.mode = GameMode::SinglePlayer;
 
         world = std::make_unique<World>(*level, InputTables::from_elf(ctx.action_elf), params);
-        world->spawn_player(0, spawns.front());
+        auto start = std::find_if(spawns.begin(), spawns.end(), [&](const SpawnPoint& marker) {
+            return launch.entry_channel != 0 && marker.entry_channel == launch.entry_channel;
+        });
+        world->spawn_player(0, start == spawns.end() ? spawns.front() : *start);
         // The profile's controller style and Y-axis inversion (PlayerSetting+0xE / +0).
         world->settings(0).controller_style = std::clamp(config.controller_style, 0, 7);
         world->settings(0).invert_look = config.invert_y;
 
         bank = open_character_bank(ctx.files, launch.bin);
+        if (const SkinDef* bond = bank->skin(0x05000007))
+            world->player(0)->set_rope_animator(make_rope_animator(*bank, *bond));
         auto weapons_owned =
             std::make_unique<WeaponSystem>(WeaponTable::from_elf(ctx.action_elf), params.health.damage);
         weapons_owned->set_autoaim(AutoaimTuning::load(tuning_text, ""));
@@ -183,18 +198,29 @@ struct SpSession::Impl {
         for (const MissionEntry& entry : load_mission_data(ctx.action_elf)) {
             if (entry.level != level_id) continue;
             auto mission = std::make_unique<MissionSystem>(*level, level_id, entry, *weapons, spsys);
-            for (const BinEntry& e : parse_bin_archive(Bytes(bin_bytes))) {
-                if (e.type != EntryType::Script) continue;
+            for (const auto& [hash, data] : bank->cutscenes()) {
                 try {
-                    mission->add_scripts({{e.hash, parse_cutscene_bin(e.data)}});
+                    mission->add_scripts({{hash, parse_cutscene_bin(data)}});
                 } catch (const std::exception& ex) {
-                    std::fprintf(stderr, "nightfire: %s: cutscene %08x skipped: %s\n", launch.bin.c_str(), e.hash,
+                    std::fprintf(stderr, "nightfire: %s: cutscene %08x skipped: %s\n", launch.bin.c_str(), hash,
                                  ex.what());
                 }
             }
             mission_sys = mission.get();
+            mission_sys->set_character_bank(bank.get());
             world->add_system(std::move(mission));
-            mission_sys->apply_loadout(0);
+            weapons->attach(*world);
+            SpawnLoadout loadout;
+            loadout.start_weapon = 0;
+            loadout.sleeve = 1;
+            weapons->spawn_player(0, loadout);
+            // Player_InitWeapon resets weapons and armour for the party disguise.
+            // The stock party entry equips fists and keeps the pistol in inventory.
+            if (launch.inventory.valid && level_id != 0x07000007)
+                mission_sys->ram_load(*world, 0, launch.inventory);
+            else
+                mission_sys->apply_loadout(0);
+            if (launch.entry_channel != 0) mission_sys->set_channel(launch.entry_channel, 1);
             for (const auto& [ch, val] : launch.channels) {
                 mission_sys->set_channel(std::uint16_t(ch), std::uint8_t(val));
                 std::printf("mission: debug preset channel %d = %d\n", ch, val);
@@ -237,8 +263,21 @@ struct SpSession::Impl {
         archive = std::make_unique<SoundArchive>(std::filesystem::path(ctx.gamedir));
         audio = std::make_unique<audio::AudioSystem>(*archive);
         audio->enter_level(level_id);
+        std::vector<MapSound> map_sounds;
+        for (const auto& chunk : level->chunks()) {
+            for (const auto& block : chunk.chunk.blocks) {
+                if (block.id != std::uint8_t(BlockId::MapSounds)) continue;
+                auto sounds = parse_map_sounds(block.data);
+                map_sounds.insert(map_sounds.end(), sounds.begin(), sounds.end());
+            }
+        }
+        audio->load_map_sounds(std::move(map_sounds));
         audio->set_sfx_volume(config.sfx_volume);
         audio->set_music_volume(config.music_volume);
+        audio->set_subtitle_callback([this](const audio::SubtitleEvent& subtitle) {
+            hud->add_message(HudMessage{HudMsgType::Subtitle, subtitle.label, {},
+                                         int(std::ceil(subtitle.duration_sec * timing.FRAME_RATE))});
+        });
         music = std::make_unique<audio::MusicDirector>(*audio, ctx.music);
         music->start_level(level_id);
 
@@ -246,8 +285,14 @@ struct SpSession::Impl {
         spsys->on_text = [this](std::uint32_t label) { hud->add_message(HudMessage{HudMsgType::Info, label, {}, 180}); };
         spsys->on_music_event = [this](int event, int arg) { music->event(std::uint32_t(event), arg); };
         spsys->on_combat_music = [this] { music->event(2, 5); };
-        spsys->on_sfx = [this](drone::Drone&, int sfx_id) { return audio->play_sfx(std::uint32_t(sfx_id)); };
+        spsys->on_sfx = [this](drone::Drone& drone, int sfx_id) {
+            return audio->play_sfx(std::uint32_t(sfx_id), {.position = drone.pos});
+        };
         spsys->sfx_finished = [this](int handle) { return !audio->is_playing(handle); };
+        drones->callbacks().on_footstep = [this](drone::Drone& drone) { play_footstep(drone.pos); };
+        drones->callbacks().on_anim_sound = [this](drone::Drone& drone, int sfx_id) {
+            audio->play_sfx(std::uint32_t(sfx_id), {.position = drone.pos});
+        };
         spsys->on_mission_fail = [this](drone::Drone&, int, std::uint32_t label) {
             if (label != 0) hud->add_message(HudMessage{HudMsgType::Mission, label, {}, 300});
             if (mission_sys) mission_sys->fail_mission(label);  // drone reason fails the mission, not just the message
@@ -266,8 +311,41 @@ struct SpSession::Impl {
         return true;
     }
 
-    void audio_frame(FrameTiming timing) {
+    void update_listener() {
+        const Player& p = *world->player(0);
+        audio::Listener listener;
+        if (auto camera = mission_sys ? mission_sys->script_camera() : std::nullopt) {
+            listener.position = camera->eye;
+            listener.dir = camera->forward;
+            listener.norm = normalised(cross(Vec3{0, 1, 0}, camera->forward));
+        } else {
+            const float c = std::cos(p.view_pitch());
+            listener.position = p.eye();
+            listener.dir = {std::sin(p.yaw) * c, std::sin(p.view_pitch()), std::cos(p.yaw) * c};
+            listener.norm = {std::cos(p.yaw), 0.0f, -std::sin(p.yaw)};
+        }
+        audio->set_listener(listener);
+    }
+
+    void play_footstep(const Vec3& pos) {
+        const Vec3 to = pos - Vec3{0, 2.0f, 0};
+        auto surface = world->collision().ray(pos, to, pick::kIgnoreGhost);
+        if (const auto* moving = world->objects().moving_meshes()) {
+            if (auto hit = moving->ray(pos, to, pick::kIgnoreGhost);
+                hit && (!surface || hit->dist < surface->dist)) surface = hit;
+        }
+        if (!surface || surface->normal[1] <= 0.0f) return;
+        const auto id = weapons->table().surface(surface->material & 0x3F).footstep_sound;
+        if (id != 0 && id != 0xFFFF) audio->play_sfx(id, {.position = surface->point});
+    }
+
+    void audio_frame(const Vec3& previous_pos) {
+        update_listener();
         for (const SoundEvent& e : weapons->events().sounds) {
+            if (e.positional) {
+                if (const auto* def = archive->sfx_defaults(std::uint32_t(e.id)); def && def->alertness > 0.0f)
+                    drones->emit_noise(e.position, def->alertness, e.exclude);
+            }
             if (e.exclude == 0 || (e.listener >= 0 && e.listener != 0)) continue;
             audio::PlayOptions o;
             if (e.positional) o.position = e.position;
@@ -280,16 +358,25 @@ struct SpSession::Impl {
             audio->play_sfx(std::uint32_t(e.id), o);
         }
         const Player& p = *world->player(0);
-        const float c = std::cos(p.view_pitch());
-        audio::Listener l;
-        l.position = p.eye();
-        l.dir = {std::sin(p.yaw) * c, std::sin(p.view_pitch()), std::cos(p.yaw) * c};
-        l.norm = {std::cos(p.yaw), 0.0f, -std::sin(p.yaw)};  // Mat_GetNorm: the listener's left
-        audio->set_listener(l);
+        if (p.enabled() && p.alive() && p.substate == SubState::Walk && p.ground_history != 0 && p.jump_state == 0) {
+            const float moved = std::hypot(p.pos[0] - previous_pos[0], p.pos[2] - previous_pos[2]);
+            step_distance += std::min(moved, std::hypot(p.velocity[0], p.velocity[2]));
+            if (step_distance >= 1.65f) {
+                step_distance -= 1.65f;
+                play_footstep(p.pos);
+            }
+        } else {
+            step_distance = 0.0f;
+        }
         const int updates = static_cast<int>(timing.FRAME_RATE_MUL);
         for (int i = 0; i < updates; ++i) {
             music->update();
             audio->update();
+        }
+        if (!audio->device_open()) {
+            std::array<std::int16_t, 3200> pcm{};
+            audio->render(pcm.data(), std::min(pcm.size() / 2,
+                std::size_t(audio->output_rate() / timing.FRAME_RATE_INT)));
         }
     }
 
@@ -315,10 +402,17 @@ struct SpSession::Impl {
         // edge here: the switch use-headers toggle on press, and held-Cross would flap them.
         const bool use = pad.held(kPadCross) && !prev_use_;
         prev_use_ = pad.held(kPadCross);
-        if (mission_sys) mission_sys->pre_tick(*world, {use, false, false, false});
+        update_listener();
+        const auto previous_weapon_events = std::exchange(weapons->events(), {});
+        if (mission_sys) mission_sys->pre_tick(*world, {use, false, false, false}, timing, &previous_weapon_events);
         if (drone_renderer && drones) drone_renderer->capture_previous(*drones);
         if (weapons) previous_viewmodel = weapons->viewmodel(0);
+        const Vec3 previous_pos = world->player(0)->pos;
         world->tick(pads, timing);
+        if (mission_sys) {
+            const auto collected = mission_sys->objects().take_bond_pickups();
+            for (unsigned i = 0; i < collected; ++i) plr_.log_bond();
+        }
         if (weather)
             weather->update(world->player(0)->eye(), timing.FRAME_RATE_MUL, timing.REC_FRAME_RATE,
                             [this](int ch) { return spsys->channels.on(ch); });
@@ -326,7 +420,7 @@ struct SpSession::Impl {
         poll_mission();
         effects->consume(weapons->events());
         effects->tick(timing.FRAME_RATE_MUL, weapons->projectiles());
-        weapons->events().clear();
+        audio_frame(previous_pos);
         maybe_give();
         // End of mission: the state machine settles on Done (success shows results, failure the
         // end-mission page); without a mission entry the legacy death/fail signals end it.
@@ -359,13 +453,74 @@ struct SpSession::Impl {
         }
         if (mission_sys) plr_.set_elapsed_100ths(std::uint32_t(mission_sys->stats().frames * 100u / 30u));
     }
+    CharacterInstance* sample_actor(const CutscenePlayer::ActorPose& pose) {
+        auto& actor = script_characters[{pose.skin, pose.script}];
+        if (!actor) {
+            const SkinDef* skin = bank->skin(pose.skin);
+            if (!skin) return nullptr;
+            auto model = std::make_unique<CharacterInstance>(*bank, *skin);
+            if (!model->play(pose.script, false)) return nullptr;
+            model->extract_root_motion(false);
+            actor = std::move(model);
+        }
+        actor->set_frame(pose.frame);
+        return actor.get();
+    }
+
+    CharacterLighting character_lighting(const Vec3& position) const {
+        auto light = effects->lighting_at(position, 3.0f);
+        if (const auto ambient = bank->ambient_at(position))
+            light.tint = {float((*ambient)[0]) / 255.0f, float((*ambient)[1]) / 255.0f,
+                          float((*ambient)[2]) / 255.0f};
+        return light;
+    }
+
+    void play_mission_sound(const MissionSystem::Sound& s) {
+        audio::PlayOptions options;
+        if (s.positional) {
+            options.position = s.pos;
+            if (s.actor.skin != 0) {
+                if (auto* actor = sample_actor(s.actor)) {
+                    const Mat4 root = actor->bone_world(0);
+                    options.position = Vec3{root[12], root[13], root[14]};
+                }
+            }
+        }
+        if (s.script_instance == 0) {
+            audio->play_sfx(s.id, options);
+            return;
+        }
+        using Action = CutscenePlayer::SoundAction;
+        const auto key = std::pair{s.script_instance, s.stream};
+        const auto* def = archive->sfx_defaults(s.id);
+        const bool looping = def && def->looping;
+        if (s.action == Action::End) {
+            if (auto it = script_sounds.find(key); it != script_sounds.end()) {
+                if (looping) audio->stop_sfx(it->second.handle);
+                script_sounds.erase(it);
+            }
+            return;
+        }
+        if (s.action == Action::Start) {
+            options.tag = next_script_sound_tag++;
+            script_sounds[key] = {audio->play_sfx(s.id, options), options.tag};
+            return;
+        }
+        if (auto it = script_sounds.find(key); it != script_sounds.end() && options.position) {
+            auto& sound = it->second;
+            if (sound.handle != 0) {
+                audio->set_position(*options.position, {}, sound.tag, s.id);
+            } else if (looping) {
+                options.tag = sound.tag;
+                sound.handle = audio->play_sfx(s.id, options);
+            }
+        }
+    }
+
     void poll_mission() {
         if (!mission_sys) return;
-        for (const MissionSystem::Sound& s : mission_sys->take_sounds()) {
-            audio::PlayOptions o;
-            if (s.positional) o.position = s.pos;
-            audio->play_sfx(s.id, o);
-        }
+        for (const auto& spawn : mission_sys->take_spawns()) spsys->spawn_scripted(spawn.pos, spawn.args);
+        for (const MissionSystem::Sound& s : mission_sys->take_sounds()) play_mission_sound(s);
         for (const MissionSystem::Text& t : mission_sys->take_texts()) {
             HudMsgType type = HudMsgType::Info;
             if (t.type == 2) type = HudMsgType::Objective;
@@ -393,15 +548,24 @@ struct SpSession::Impl {
         const float aspect = gv.aspect;
         Camera wc = cam;
         wc.fovy = kViewFovY / std::max(1.0f, weapons->zoom(0));
-        // Cutscene camera override (NIS): eye + forward + degree FOV [INFERENCE: degrees].
-        if (mission_sys) {
-            if (const auto sc = mission_sys->script_camera()) {
-                const auto& f = sc->forward;
-                const float yaw = std::atan2(f[0], f[2]);
-                const float pitch = std::asin(std::clamp(f[1], -1.0f, 1.0f));
-                wc = camera_for_eye_yaw_pitch({sc->eye[0], sc->eye[1], sc->eye[2]}, yaw, pitch);
-                wc.fovy = sc->fov * 3.14159265f / 180.0f;
-            }
+        const Player& player = *world->player(0);
+        const auto cutscene = mission_sys ? mission_sys->script_camera() : std::nullopt;
+        const bool wall_hug = !cutscene && player.substate == SubState::Creep;
+        if (cutscene) {
+            const Vec3& f = cutscene->forward;
+            wc = camera_for_eye_yaw_pitch(cutscene->eye, std::atan2(f[0], f[2]),
+                                          std::asin(std::clamp(f[1], -1.0f, 1.0f)));
+            wc.fovy = cutscene->fov;
+        } else if (wall_hug) {
+            const Vec3 target = player.pos + Vec3{0, 0.25f, 0};
+            const Vec3 facing{std::sin(player.yaw), 0, std::cos(player.yaw)};
+            Vec3 eye = target + facing * 5.6f + Vec3{facing[2] * 2.2f, -3.25f, -facing[0] * 2.2f};
+            if (const auto hit = world->collision().ray(target, eye, pick::kIgnoreGhost))
+                eye = target + (hit->point - target) * 0.9f;
+            const Vec3 direction = target - eye;
+            wc = camera_for_eye_yaw_pitch(eye, std::atan2(direction[0], direction[2]),
+                                          std::atan2(direction[1], std::hypot(direction[0], direction[2])));
+            wc.fovy = kViewFovY;
         }
         glDisable(GL_SCISSOR_TEST);
         glViewport(0, 0, width, height);
@@ -412,11 +576,37 @@ struct SpSession::Impl {
         glScissor(gv.x, gl_y, gv.w, gv.h);
         glClearColor(0.25f, 0.3f, 0.4f, 1);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        if (mission_sys) renderer->set_hidden_placements(mission_sys->hides());
         renderer->draw(wc, aspect, false);
         if (weather && weather->active())
             weather->draw(wc, renderer->view_projection(wc, aspect));
-        if (drone_renderer && drones) drone_renderer->draw(wc, aspect, *drones, interpolation);
-        renderer->draw_objects(wc, aspect, effects->take_blast_draws(interpolation));
+        if (drone_renderer && drones)
+            drone_renderer->draw(wc, aspect, *drones, interpolation,
+                                 [this](const Vec3& root) { return character_lighting(root); });
+        auto object_draws = effects->take_blast_draws(interpolation);
+        if (mission_sys) {
+            for (const auto& draw : mission_sys->draws()) {
+                const auto& placement = level->placements()[draw.placement];
+                object_draws.push_back({placement.chunk, placement.model, draw.transform});
+            }
+            for (const auto& pose : mission_sys->script_actors()) {
+                auto* actor = sample_actor(pose);
+                if (!actor) continue;
+                const Mat4 root = actor->bone_world(0);
+                const Vec3 position{root[12], root[13], root[14]};
+                chars->draw(wc, aspect, actor->skin(), actor->palette(), identity(), 0, actor->facial(),
+                            character_lighting(position));
+            }
+        }
+        renderer->draw_objects(wc, aspect, object_draws);
+        if (wall_hug) {
+            if (const auto* actor = player.rope_character()) {
+                const float s = std::sin(player.yaw), c = std::cos(player.yaw);
+                const Mat4 transform{c, 0, -s, 0, 0, 1, 0, 0, s, 0, c, 0,
+                                     player.pos[0], player.pos[1], player.pos[2], 1};
+                chars->draw(wc, aspect, actor->skin(), actor->palette(), transform, 0, actor->facial());
+            }
+        }
         effects->draw(wc, aspect, *chars, weapons->projectiles(), interpolation);
         glClear(GL_DEPTH_BUFFER_BIT);
         ViewModel vm = weapons->viewmodel(0);
@@ -426,6 +616,12 @@ struct SpSession::Impl {
             vm.muzzle_flash =
                 previous_viewmodel.muzzle_flash + (vm.muzzle_flash - previous_viewmodel.muzzle_flash) * interpolation;
         }
+        if (!cutscene && !wall_hug && vm.visible && vm.skin && vm.anim) {
+            const auto& def = weapons->table().weapon(vm.weapon);
+            const Vec3 muzzle = weapon_view->draw(wc, aspect, vm, def, effects->lighting_at(wc.eye, 2.0f),
+                                                  &world->collision());
+            if (vm.muzzle_flash > 0.0f && muzzle != Vec3{}) effects->muzzle_flash(muzzle, def, 0);
+        }
         glEnable(GL_DEPTH_TEST);
         glDisable(GL_BLEND);
         // HUD overlay (the ui canvas letterboxes over the 3D frame; no clear).
@@ -433,10 +629,19 @@ struct SpSession::Impl {
         weapons->fill_hud(0, hs);
         hs.context_icon = world->player(0)->icon_context();   // HUD_UpdateHealthPane reads BLData+0x95F
         hs.controller_style = world->settings(0).controller_style;
+        if (wall_hug) hs.cam_mode = 1;
+        if (hud->enabled(HudPane::Ammo) == wall_hug) hud->enable(HudPane::Ammo, !wall_hug);
         hud->update(hs);
         ui.begin(width, height, false);
         ui::select_prompts(0, InputContext::OnFoot);
-        hud->draw(ui, text);
+        if (cutscene) {
+            const float edge = (ui.canvas_width() - ui::kScreenW) * -0.5f;
+            constexpr float bar = 64.0f;
+            ui.fill({edge, 0, ui.canvas_width(), bar}, {0, 0, 0, 255});
+            ui.fill({edge, ui::kScreenH - bar, ui.canvas_width(), bar}, {0, 0, 0, 255});
+        } else {
+            hud->draw(ui, text);
+        }
         // Cutscene fade overlay (MissionSystem::fade 0..1 black).
         if (mission_sys && mission_sys->fade() > 0.001f) {
             const auto a = std::uint8_t(std::clamp(mission_sys->fade(), 0.0f, 1.0f) * 128.0f);
@@ -480,6 +685,14 @@ struct SpSession::Impl {
                 save_config(config_path(), s.user_config);
             }
         } keep{*this, menu};
+        if (!page) {
+            const Player& player = *world->player(0);
+            draw_frame(camera_for_eye_yaw_pitch(player.shaken_eye(), player.yaw, player.view_pitch()), 1.0f);
+            int w, h;
+            window.begin_frame(w, h);
+            const GameView view = game_view(config, w, h);
+            ui.capture_backdrop(view.x, h - view.y - view.h, view.w, view.h);
+        }
         PadHistory hist;
         bool wait_release = true;
         while (!menu.wants_close()) {
@@ -506,6 +719,7 @@ struct SpSession::Impl {
             int w, h;
             window.begin_frame(w, h);
             ui.begin(w, h);
+            if (!page) ui.draw_backdrop();
             ui::select_prompts(0, InputContext::Menu);
             menu.draw(ui, text);
             ui.end();
@@ -528,6 +742,19 @@ struct SpSession::Impl {
             return 0;  // last mission: the bonus chain leads to wingame, then the frontend
         }
         return 0;
+    }
+
+    std::optional<SpResult> continuation() const {
+        if (!mission_sys || mission_sys->state() == MissionSystem::State::Failed ||
+            !world->player(0)->alive() || mission_sys->pending_level() == 0) return std::nullopt;
+        const auto next = mission_sys->pending_level();
+        const auto rows = load_mission_data(ctx.action_elf);
+        const auto current = std::find_if(rows.begin(), rows.end(), [&](const MissionEntry& e) { return e.level == level_id; });
+        const auto target = std::find_if(rows.begin(), rows.end(), [&](const MissionEntry& e) { return e.level == next; });
+        if (current == rows.end() || target == rows.end() || current->base != target->base || next == level_id)
+            return std::nullopt;
+        return SpResult{SpExit::NextMission, false, false, next, mission_sys->carried_inventory(),
+                        mission_sys->exit_channel()};
     }
 
     // Results content for P_NFRESULTS (stats + next-mission name).
@@ -705,8 +932,12 @@ SpResult SpSession::run_interactive() {
             previous_yaw = previous_player.yaw;
             previous_pitch = previous_player.view_pitch();
             s.tick_world(pad);
-            if (has_audio) s.audio_frame(s.timing);
             accumulator -= kStep;
+            if (auto next = s.continuation()) {
+                done = std::move(*next);
+                finished = true;
+                break;
+            }
             if (s.death_frames > 3 * s.timing.FRAME_RATE_INT && !s.end_shown) {
                 s.end_shown = true;
                 if (s.mission_won) {
@@ -786,6 +1017,10 @@ SpResult SpSession::run_headless(const SpHeadless& headless) {
             i < long(script.size()) ? script[std::size_t(i)].pad : compensate_sticks(PadState{});
         s.tick_world(pad);
         ran = i + 1;
+        if (auto next = s.continuation()) {
+            std::printf("%s -> %08x (entry channel %u)\n", s.launch.bin.c_str(), next->next_level, next->entry_channel);
+            return *next;
+        }
         if (s.mission_sys && s.mission_sys->state() == MissionSystem::State::Done) break;
     }
     const Player& p = *s.world->player(0);

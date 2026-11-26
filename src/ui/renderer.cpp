@@ -64,6 +64,7 @@ Renderer::Renderer(const SpriteLibrary& sprites) : sprites_(sprites) {
 Renderer::~Renderer() {
     for (auto& [hash, tex] : textures_) glDeleteTextures(1, &tex);
     if (frame_) glDeleteTextures(1, &frame_);
+    if (backdrop_) glDeleteTextures(1, &backdrop_);
     glDeleteTextures(1, &white_);
 }
 
@@ -142,11 +143,17 @@ void Renderer::push_quad(Rect d, float u0, float v0, float u1, float v1, Color c
     batch_.insert(batch_.end(), {a, b, cc, a, cc, e});
 }
 
-bool Renderer::draw(std::uint32_t hash, Rect dst, Rect src, Color color) {
+bool Renderer::draw(std::uint32_t hash, Rect dst, Rect src, Color color, std::uint64_t tick) {
     GLuint tex = gl_texture(hash);
     if (!tex) return false;
     const Texture* t = sprites_.find(hash);
     bind(tex);
+    if (t->frames > 1) {
+        flush();
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, GLsizei(t->width), GLsizei(t->height), GL_RGBA, GL_UNSIGNED_BYTE,
+                        t->frame_pixels(t->frame_at(tick)));
+    }
     push_quad(dst, src.x / float(t->width), src.y / float(t->height), (src.x + src.w) / float(t->width),
               (src.y + src.h) / float(t->height), color);
     return true;
@@ -181,6 +188,24 @@ void Renderer::draw_frame(Rect dst, int width, int height, const std::uint32_t* 
     bind(frame_);
     push_quad(dst, 0, 0, 1, 1, {0x80, 0x80, 0x80, 0x80});
 }
+
+void Renderer::capture_backdrop(int x, int y, int width, int height) {
+    if (!backdrop_) glGenTextures(1, &backdrop_);
+    glBindTexture(GL_TEXTURE_2D, backdrop_);
+    glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, x, y, width, height, 0);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+}
+
+void Renderer::draw_backdrop() {
+    if (!backdrop_) return;
+    bind(backdrop_);
+    const float width = canvas_width();
+    push_quad({(kScreenW - width) * 0.5f, 0, width, kScreenH}, 0, 1, 1, 0, {});
+}
+
 std::pair<std::uint32_t, std::uint32_t> Renderer::texture_size(std::uint32_t hash) const {
     const Texture* t = sprites_.find(hash);
     return t ? std::make_pair(t->width, t->height) : std::make_pair(0u, 0u);

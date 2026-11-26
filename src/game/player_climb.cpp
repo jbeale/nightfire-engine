@@ -165,7 +165,8 @@ bool Player::mount_creep_wall(const CreepWallObject& wall, const CollisionWorld&
     yaw = wall.yaw + kPi;
     pos[0] = on_line[0];
     pos[2] = on_line[2];
-    if (const auto floor = world.ray(on_line, on_line - Vec3{0.0f, kCreepFloorProbe, 0.0f}, kCreepFloorPick, 0))
+    const Vec3 probe{0.0f, kCreepFloorProbe, 0.0f};
+    if (const auto floor = world.ray(on_line + probe, on_line - probe, kCreepFloorPick, 0))
         pos[1] = floor->point[1] + kCreepFloorHeight;
 
     rope_.weapon_stowed = true;           // Player_WeaponNone
@@ -177,6 +178,21 @@ bool Player::mount_creep_wall(const CreepWallObject& wall, const CollisionWorld&
     creep_wall_ = &wall;
     ladder_ = nullptr;
     return true;
+}
+
+void Player::attach_near_script_wall(const CollisionWorld& world) {
+    if (!object_world_) return;
+    const CreepWallObject* nearest = nullptr;
+    float best = 4.0f;  // Player_Enable uses a two-unit sphere to find an attachment.
+    for (const CreepWallObject& wall : object_world_->creep_walls()) {
+        const CreepLine line = creep_line(wall);
+        const Vec3 delta = closest_point_on_segment(line.a, line.b, pos) - pos;
+        const float distance = dot(delta, delta);
+        if (distance >= best) continue;
+        nearest = &wall;
+        best = distance;
+    }
+    if (nearest) mount_creep_wall(*nearest, world);
 }
 
 // Player_Activate, creep walls: with a "hug the wall" ThirdIcon underfoot the use action takes the creep wall

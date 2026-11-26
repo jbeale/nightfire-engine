@@ -31,7 +31,8 @@ std::vector<SpawnPoint> find_spawn_points(const Level& level) {
         else continue;
         std::string model;
         if (s.hash == -1 && s.model_index < chunk.models.size()) model = chunk.models[s.model_index].name;
-        SpawnPoint p{kind, {s.position[0], s.position[1], s.position[2]}, s.euler[1], model, s.param(3)};
+        SpawnPoint p{kind, {s.position[0], s.position[1], s.position[2]}, s.euler[1], model, s.param(3),
+                     std::uint16_t(s.param(0))};
         (kind == SpawnPoint::Kind::SinglePlayer ? single : multi).push_back(std::move(p));
     }
     single.insert(single.end(), multi.begin(), multi.end());

@@ -489,9 +489,10 @@ after the movie id (`psiStartBackgroundMovie("%s%s%8.8x.pss%s")`: attract `0x73A
 `0x7380048`, esthero `0x73B0048`, trailer `0x7390048`, wingame `0x73F0048`, plus per-mission `0x71xxxxxx`
 and trailer variants). Playback there is the PS2 PSS library (`StartUpBGFMV`/`playPssRsrcs`, IPU hardware
 decode to the framestore, `psiMovieFinished` polls). Video here is plain mpeg2video (512x448, 30 fps);
-audio is 48 kHz stereo s16le PCM in the 0xBD private packets (each PES payload is `ff a0 00 00` +
-samples; rate/channels from the first packet's SShd header; concatenated payloads decode gapless,
-track length matches the video duration to a frame). Playback: `cmake/MediaFFmpeg.cmake` (system
+audio is 48 kHz stereo s16le PCM in the 0xBD private packets. The first packet's `SShd` header gives the
+rate, channel count and block size, and `SSbd` gives the sample byte count. On this disc each stereo group
+has 512 bytes of left samples followed by 512 bytes of right samples. Playback strips the PES headers,
+joins the blocks across packet boundaries and interleaves the samples for SDL. See `cmake/MediaFFmpeg.cmake` (system
 libavformat/libavcodec/libswscale via pkg-config), `src/media/movie_player.*` (libav video + manual
 audio scan), `ui::Renderer::draw_frame`, PCM through a short-lived SDL device. Menu movie pages
 request their PSS id (`Frontend::take_movie_request`, `movie_finished` for the post-movie transition);
@@ -785,14 +786,14 @@ infinite type-0 lights (`Light_SetAmbientRadiators`), so `Lights_CalcClosestLigh
 `update`, `lights_for`); `nfview --flash` adds a muzzle-flash light at the character. Fades that cover the screen
 (`Script_FadeStart` -> `Camera_SetFade`) are a viewer-side overlay, not an object tint.
 
-Environment mapping (box 0 flags +0x34 bit 0, read by `FillMatrixChainRot`; 876 models on the disc: weapon metal,
-heads, glass, gadgets): the VU program builds ST from the camera axes instead of the vertex UVs. `FillMatrixChainSkin`
-always uploads two vectors with a 0.5 bias (VU data qw 16/17); the rigid path uploads them only for flagged models.
+Environment mapping (box 0 flags +0x34 bit 0, read by `FillMatrixChainRot`; 876 flagged models on the disc): the
+rigid VU path can build ST from the camera axes instead of the vertex UVs.
 The vectors are viewer view-matrix rows 0/1 (viewer_tag+0x120 is a matrix: `MatrixBond2PS2_2(viewer+0x120)` in
 `PS2WorldViewVU1Kick2`), i.e. unit camera axes, scaled by 1/256 (`* 0.00390625`). The sweep is tiny on purpose:
-each surface samples near its texture's centre texel (matte finish: gold stays gold, glass stays tinted, faces stay
-skin). The skinned path has its own VU variant (flagged skinned meshes exist, e.g. grunt heads). `model_envmapped`,
-`SkinnedMesh`/`GfxMesh::envmap`; the renderer shades flagged meshes with `ST = (N.R, N.U) + 0.5` from the uploads.
+each surface samples near its texture's centre texel. `GfxMesh::envmap` carries this flag for rigid parts. The skinned
+draw submits the cloned DMA chain through `psiDrawClonedObject` with an MSCAL entry chosen by sphere clipping.
+`FillMatrixChainSkin` always uploads the two camera vectors and does not read the box flag. The rewrite uses the
+chain's authored ST for skinned batches, including Bond's tuxedo mesh, whose face atlas requires the full UV range.
 
 ## Sound: banks, music, streams
 

@@ -23,8 +23,7 @@ constexpr int kNoWeapon = 71;       // Player_WeaponNone
 constexpr int kFists = 1;
 // Player_Init replaces weapon_data[1].model_gfx with the default Bond fist skin before creating the anim object.
 constexpr std::uint32_t kFistsModelGfx = 0x050000B0;
-constexpr int kFidgetDeep = 600;      // +2362 frames for the +204 path (20 s at 30 Hz logic)
-constexpr int kFidgetHold = 600;      // +2366 = 20 s at 30 Hz once a +212 starts
+constexpr int kWeaponIdleSeconds = 20;
 
 bool is_gadget(int id) { return id >= 74 && id < 95; }
 
@@ -204,6 +203,9 @@ int WeaponSystem::clip(int slot, int weapon_id) const {
     return state(slot) ? state(slot)->weapon[std::size_t(ammo_index(weapon_id))].clip : 0;
 }
 int WeaponSystem::ammo_pool(int slot, int ammo_type) const { return state(slot) ? state(slot)->pool.at(std::size_t(ammo_type)) : 0; }
+void WeaponSystem::restore_clip(int slot, int weapon_id, int rounds) {
+    if (auto* p = state(slot)) p->weapon[std::size_t(ammo_index(weapon_id))].clip = std::int16_t(rounds);
+}
 bool WeaponSystem::aiming(int slot) const { return state(slot) && state(slot)->aim; }
 float WeaponSystem::zoom(int slot) const { return state(slot) ? state(slot)->zoom : 1.0f; }
 
@@ -531,17 +533,18 @@ void WeaponSystem::reset_zoom_for_weapon(PlayerWeapons& p) {
 }
 
 void WeaponSystem::anim_update(int slot, PlayerWeapons& p, World& world, FrameTiming timing) {
-    (void)timing;
     const ActionInput& in = world.input(slot);
     const WeaponDef& cur = table_.weapon(p.current);
     const WeaponDef& prev = table_.weapon(p.previous);
-    const bool fire_held = in.held(kActFire) && !p.fire_blocked;
-    (void)fire_held;
+    const int idle_delay = kWeaponIdleSeconds * timing.FRAME_RATE_INT;
     auto to_idle = [&](std::uint32_t script) {
         if (script) play_script(p, script, true);
         p.anim_state = WeaponAnim::Idle;
     };
-    if (p.anim_state != WeaponAnim::Idle) { p.idle_frames = 0; p.fidget_frames = kFidgetHold; }   // +2362=0, +2366 pinned (decomp state!=0 branch)
+    if (p.anim_state != WeaponAnim::Idle) {
+        p.idle_frames = 0;
+        p.fidget_frames = idle_delay;
+    }
     switch (p.anim_state) {
         case WeaponAnim::Lower:
         case WeaponAnim::LowerAlt: {
@@ -694,21 +697,22 @@ void WeaponSystem::anim_update(int slot, PlayerWeapons& p, World& world, FrameTi
             break;
         case WeaponAnim::Idle:
         default: {
-            // Idle fidget machine (spec 760, Player_SetWeaponAnimObj state 0): +2362 counts Idle frames
-            // (cleared on state/phase change, pinned by PlayerSetting[340]); +2366 spaces +212 repeats.
-            if (world.settings(slot).idle_count_hold) p.idle_frames = 0;   // PlayerSetting[340]: pin +2362
-            else if (p.idle_frames < kFidgetDeep) p.idle_frames++;   // +2362 counts Idle frames
-            // Quiet = no aim and sticks in the deadzone (cursor proxy: the original tests BLData+288/292,
-            // which only move outside the stick deadzone; uncompensated centred sticks read ~0.008 here).
+            // A ready weapon also uses the Idle state while the player moves. Count uninterrupted quiet
+            // time for inspection, using a deadzone that covers the compensated stick's centre bias.
             const auto centred = [&](int a) { return std::fabs(in.actionf(a)) < 0.05f; };
             const bool quiet =
-                !p.aim && centred(kActTurn) && centred(kActStrafe) && centred(kActForward) &&
+                !in.held(kActAim) && !in.held(kActFire) &&
+                centred(kActTurn) && centred(kActStrafe) && centred(kActForward) &&
                 centred(kActLookX) && centred(kActLookY) && centred(kActLookPitch);
+            if (!quiet || world.settings(slot).idle_count_hold) p.idle_frames = 0;
+            else if (p.idle_frames < idle_delay) ++p.idle_frames;
             // Threat blocks +208 and triggers +212 (spec polarity).
             const bool threat = drones_ && drones_->any_visible_threat();
             if (p.fidget_frames > 0) p.fidget_frames--;
-            // +204 first per state-0 frame (count only — fires even aiming, any phase).
-            if (p.idle_frames >= kFidgetDeep && cur.anim_deepidle != 0) {
+            if (p.idle_phase == 1 && !quiet && cur.anim_deepidle != 0 && p.anim_script == cur.anim_deepidle) {
+                to_idle(cur.anim_idle);
+                p.idle_phase = 0;
+            } else if (p.idle_frames >= idle_delay && cur.anim_deepidle != 0) {
                 play_script(p, cur.anim_deepidle, false);
                 if (p.anim_script == cur.anim_deepidle) {
                     p.idle_phase = 1;
@@ -729,7 +733,7 @@ void WeaponSystem::anim_update(int slot, PlayerWeapons& p, World& world, FrameTi
                             if (p.anim_script == cur.anim_misc) {
                                 p.idle_phase = 1;
                                 p.idle_frames = 0;
-                                p.fidget_frames = kFidgetHold;
+                                p.fidget_frames = idle_delay;
                             }
                         }
                     }
@@ -966,6 +970,7 @@ void WeaponSystem::update_autoaim(int slot, PlayerWeapons& p, World& world) {
     float best_yaw = 0, best_pitch = 0;
     for (const Victim& v : collect_victims(world)) {
         if (v.id == slot) continue;
+        if (v.target && !v.target->autoaim_target()) continue;
         if (rules_ && rules_->teammates(slot, v.id)) continue;   // MP_areObjectsOnSameTeam
         // Check_AutoAim aims at the torso-bone world pos (AnimGetBoneWorldTrans bone 0x80000002) for live
         // combatants: the capsule centre for registered targets, eye height minus chest drop for players
@@ -1111,6 +1116,14 @@ void WeaponSystem::tick_player(int slot, World& world, FrameTiming timing) {
         else rules_->player_killed(slot, pl.last_hit.attacker, pl.last_hit.weapon);
     }
     if (p.dead) {
+        active_lag_comp_ = {};
+        return;
+    }
+    if (!pl.enabled() || pl.substate == SubState::Creep || pl.vehicle().kind == VehicleKind::Car) {
+        p.aim = p.aim_latched = false;
+        p.zoom = p.zoom_target = pl.zoom = 1.0f;
+        p.muzzle_frames = 0;
+        pl.body_flags &= std::uint16_t(~body::kZoomed);
         active_lag_comp_ = {};
         return;
     }

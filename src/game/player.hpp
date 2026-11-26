@@ -194,6 +194,7 @@ public:
     // after two frames; enable_at teleports first (obj position and heading from a matrix).
     void disable(bool freeze_input_only = false);
     void enable();
+    void attach_near_script_wall(const CollisionWorld& world);
     void enable_at(const Vec3& position, float yaw);
     bool enabled() const { return enabled_ != 0; }
     bool input_frozen() const { return input_frozen_; }
@@ -230,6 +231,7 @@ public:
     // The wire / zip line objects and animation the substates need (World::spawn_player attaches the world's).
     void set_rope_world(const RopeWorld* world) { rope_world_ = world; }
     void set_rope_animator(std::shared_ptr<RopeAnimator> animator) { rope_animator_ = std::move(animator); }
+    const CharacterInstance* rope_character() const { return rope_animator_ ? rope_animator_->character() : nullptr; }
     // Player_WeaponNone was applied on grabbing a wire; the weapon code puts the weapon back on release.
     bool weapon_stowed() const { return rope_.weapon_stowed; }
     // The objects the collision pass reports beyond the world cels (ladders, wires, grapple points, ThirdIcon zones),
@@ -412,6 +414,7 @@ private:
     std::function<bool(const ActivationProbe&)> use_handler_;   // Scripting::SpObjects::activate_at
     // Vehicles (player_vehicle.cpp). BL+0x878 holds the vehicle/gun object while boarded.
     BoardedVehicle vehicle_;
+    SubState vehicle_return_state_ = SubState::Walk;
     CamMode cam_mode_ = CamMode::FirstPerson;   // BL+0x950
     std::int16_t spawn_timer_ = 0;              // BL+0x4A2: substate 10 countdown
     bool spawn_flag_ = false;                   // BL+0x21E: substate 10 camera still to restore

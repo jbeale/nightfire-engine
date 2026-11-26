@@ -379,6 +379,7 @@ WeaponTable WeaponTable::from_elf(const Elf32& elf) {
         e.puff_gfx[1] = load<std::uint32_t>(fx, o + 12);
         e.spark_gfx = load<std::uint32_t>(fx, o + 16);
         e.impact_sound = load<std::uint16_t>(fx, o + 20);
+        e.footstep_sound = load<std::uint16_t>(fx, o + 22);
         e.ricochet_sound = load<std::uint16_t>(fx, o + 24);
         e.ricochet_prob = fx[o + 26];
         e.restitution = load<float>(fx, o + 28);

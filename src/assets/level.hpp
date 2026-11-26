@@ -36,6 +36,7 @@ public:
     const ChunkFile* map() const { return map_ < chunks_.size() ? &chunks_[map_] : nullptr; }
     const std::vector<Placement>& placements() const { return placements_; }
     std::size_t unresolved_instances() const { return unresolved_; }
+    Bytes script(std::uint32_t hash) const;
 
     // Decoded on first use and cached.
     const GfxMesh& mesh(std::size_t chunk, std::size_t model);
@@ -47,6 +48,7 @@ private:
     std::vector<Placement> placements_;
     std::size_t unresolved_ = 0;
     std::unordered_map<std::uint64_t, std::unique_ptr<GfxMesh>> meshes_;
+    std::unordered_map<std::uint32_t, Bytes> scripts_;
 };
 
 std::array<float, 16> instance_transform(const StaticInstance& s);

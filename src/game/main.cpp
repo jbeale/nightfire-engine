@@ -382,14 +382,11 @@ int run(int argc, char** argv) {
         std::fprintf(stderr, "no such level .bin: %s\n", bin_name.c_str());
         return 1;
     }
-    // Cutscene scripts (type-7 entries) for the mission system, parsed before the move below.
-    std::vector<std::pair<std::uint32_t, CutsceneBin>> level_scripts;
     std::vector<std::pair<std::uint32_t, Bytes>> effect_script_data;
     try {
         for (const BinEntry& e : parse_bin_archive(Bytes(bin))) {
             if (e.type != EntryType::Script) continue;
             if (e.hash == 0x06000052 || e.hash == 0x060007C4) effect_script_data.emplace_back(e.hash, e.data);
-            level_scripts.emplace_back(e.hash, parse_cutscene_bin(e.data));
         }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "%s: scripts: %s\n", bin_name.c_str(), e.what());
@@ -421,6 +418,10 @@ int run(int argc, char** argv) {
     // Weapons: weapon_data / ammo_data from the ELF's static initializer, skins and anim scripts from the level's
     // animation bank; damage to players goes through Player::hurt (params.health.damage).
     std::unique_ptr<CharacterBank> weapon_bank = open_character_bank(gf, bin_name);
+    if (!multiplayer && weapon_bank) {
+        if (const auto* bond = weapon_bank->skin(0x05000007))
+            player.set_rope_animator(make_rope_animator(*weapon_bank, *bond));
+    }
     auto weapon_system = std::make_unique<WeaponSystem>(WeaponTable::from_elf(action_elf), params.health.damage);
     weapon_system->set_autoaim(AutoaimTuning::load(tuning_text, multiplayer ? "MULTIPLAYER" : ""));
     weapon_system->seed_match(std::uint32_t(weapon_seed));   // --seed drives the global Rand stream
@@ -444,7 +445,14 @@ int run(int argc, char** argv) {
             if (e.level != level_id) continue;
             auto m = std::make_unique<MissionSystem>(level, level_id, e, weapons, drone_cli.sp_system());
             mission_ptr = m.get();
-            mission_ptr->add_scripts(std::move(level_scripts));
+            mission_ptr->set_character_bank(weapon_bank.get());
+            for (const auto& [hash, data] : weapon_bank->cutscenes()) {
+                try {
+                    mission_ptr->add_scripts({{hash, parse_cutscene_bin(data)}});
+                } catch (const std::exception& ex) {
+                    std::fprintf(stderr, "%s: cutscene %08x skipped: %s\n", bin_name.c_str(), hash, ex.what());
+                }
+            }
             mission_ptr->apply_loadout(0);
             world.add_system(std::move(m));
             std::printf("mission: %08x base %08x order %u, %zu objectives, %zu doors\n", level_id, e.base, e.order,
@@ -503,8 +511,8 @@ int run(int argc, char** argv) {
         if (sync && f && f->sync_pos) player.pos = *f->sync_pos;
         if (script) script->apply(i, world, weapons, pads);
         // Cross/use goes through Movement's Player_Activate -> SpObjects::activate_at hook now.
-        if (mission_ptr) mission_ptr->pre_tick(world, std::vector<bool>(4, false));
         const FrameTiming timing{f && f->has_rate ? f->rate : float(logic_hz)};
+        if (mission_ptr) mission_ptr->pre_tick(world, std::vector<bool>(4, false), timing);
         world.tick(pads, timing);
         drone_cli.after_tick(world);
         if (mission_ptr) {
@@ -514,9 +522,11 @@ int run(int argc, char** argv) {
             for (const auto& m : mission_ptr->take_music())
                 std::printf("mission music: event %d value %d\n", m.event, m.value);
             for (int id : drone_cli.drain_coder_spawns(*mission_ptr)) (void)id;   // coder spawns (event 8)
-            for (const auto& s : mission_ptr->take_sounds())
+            for (const auto& s : mission_ptr->take_sounds()) {
+                if (s.action != CutscenePlayer::SoundAction::Start) continue;
                 std::printf("mission sound: %u at %.1f,%.1f,%.1f%s\n", s.id, s.pos[0], s.pos[1], s.pos[2],
                             s.positional ? " 3D" : "");
+            }
             for (const auto& c : mission_ptr->take_channel_log())
                 std::printf("mission channel: f%llu ch %d = %d\n", (unsigned long long)c.frame, c.channel,
                             (int)c.value);
@@ -559,7 +569,7 @@ int run(int argc, char** argv) {
         cam.eye = {sc->eye[0], sc->eye[1], sc->eye[2]};
         cam.yaw = std::atan2(-sc->forward[0], -sc->forward[2]);
         cam.pitch = std::asin(std::clamp(sc->forward[1], -1.0f, 1.0f));
-        cam.fovy = sc->fov * 3.14159265f / 180.0f;
+        cam.fovy = sc->fov;
         return true;
     };
     auto draw = [&](const Camera& cam, float interpolation) {
@@ -671,6 +681,7 @@ int run(int argc, char** argv) {
                     std::printf("mission music: event %d value %d\n", m.event, m.value);
                 for (int id : drone_cli.drain_coder_spawns(*mission_ptr)) (void)id;   // coder spawns (event 8)
                 for (const auto& s : mission_ptr->take_sounds()) {
+                    if (s.action != CutscenePlayer::SoundAction::Start) continue;
                     std::printf("mission sound: %u at %.1f,%.1f,%.1f%s\n", s.id, s.pos[0], s.pos[1], s.pos[2],
                                 s.positional ? " 3D" : "");
                     if (game_audio) game_audio->play_mission(s.id, s.pos, s.positional);

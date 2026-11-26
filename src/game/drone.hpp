@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -57,6 +58,7 @@ enum : int {
     kSeesOpponents = 0x3c,
     kFireAtLastKnown = 0x17,      // keeps firing at last-known pos (no sight timeout)
     kNeverMovesInCombat = 0x40,
+    kFindCover = 0x30,
     kHeadTracks = 0x4c,
     kIdleFidget = 0x46,
     kAimStandPreferred = 0x18,
@@ -425,6 +427,7 @@ public:
     } mv;
     DroneLook look;
     std::unique_ptr<CharacterInstance> character;   // owned by the drone; created by DroneSystem::spawn
+    std::optional<float> death_start_root_height;    // vertical animation origin for grounded campaign deaths
     std::unique_ptr<NavAgent> nav;                  // routes / goals (null when the level has no nav network)
     bool fresh = true;                              // Global ENTER not delivered yet (runs on the first tick)
 

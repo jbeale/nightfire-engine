@@ -3,6 +3,9 @@
 #include <set>
 
 #include "game/sp_common.hpp"
+#include "game/sp_civilian_util.hpp"
+#include "game/drone_vision.hpp"
+#include "game/sp_state_ids.hpp"
 #include "game/sp_states.hpp"
 #include "game/weapons.hpp"
 
@@ -53,6 +56,12 @@ SpSystem::SpSystem(DroneSystem& drones, SpLevel level, SpTables tables, SpConfig
     cb.switch_channel = [this](int ch) { return channels.on(ch); };
     cb.visibility_at = [this](const Vec3& p) { return level_.visibility_at(p); };
     cb.seen_and_attacking = [this](Drone& d) { note_attacker(d); };
+    cb.on_death = [this](Drone& d, int) {
+        if (!sx_or_null(d)) return;
+        ++stats.deaths;
+        if (!d.head_shot) speak(d, Speech::Death);
+    };
+    cb.on_death_channel = [](Drone& d) { notify_death(d); };
     music_from_level(config_.level_id, music_need_, music_seconds_, music_radius_);
 }
 
@@ -62,8 +71,9 @@ void SpSystem::note_attacker(Drone& d) {
     // NDrone2_SeenAndAttacking 0x145150; thresholds = MapDroneData row of the level (music trigger table)
     if (d.side != drone::kSideEnemy) return;
     if (config_.level_id == 0x700000c && (d.sight_flags & drone::sight::kFirstSighted) == 0) return;
-    bool recent = d.now() < d.last_seen_time + d.seconds(music_seconds_);
-    if (d.opp_dist < music_radius_ && music_active_) recent = true;
+    const bool castle_approach = config_.level_id == 0x07000005;
+    bool recent = d.last_seen_time != 0 && d.now() < d.last_seen_time + d.seconds(music_seconds_);
+    if (!castle_approach && d.opp_dist < music_radius_ && music_active_) recent = true;
     min_dist_ = std::min(min_dist_, d.opp_dist);
     if (d.seen_frames != 0) min_seen_dist_ = std::min(min_seen_dist_, d.opp_dist);
     max_last_seen_ = std::max(max_last_seen_, d.last_seen_time);
@@ -72,11 +82,100 @@ void SpSystem::note_attacker(Drone& d) {
     if (passed_.size() < 100) passed_.push_back(d.id);
     ++music_count_;
     ++attackers_now_;
-    if (float(music_count_) >= music_need_ || music_active_) {
+    const bool saw_bond = castle_approach && d.opponent == drone::TargetRef::player(0);
+    if (saw_bond && !music_active_)
+        drone::alert_others(d, drone::kMsgShoutAttack, d.opponent, d.opp_last_known);
+    if (float(music_count_) >= music_need_ || music_active_ || saw_bond) {
         music_active_ = true;
         music_time_ = d.now();
         if (on_combat_music) on_combat_music();
     }
+}
+
+void SpSystem::alert_near_spotlight(const Vec3& pos) {
+    for (drone::Drone* d : sp_drones()) {
+        if (!d->alive() || d->ghost || d->hidden || d->side != drone::kSideEnemy ||
+            d->smi.cur == drone::kStateWaitSwitch || length(d->pos - pos) > music_radius_) continue;
+        drone::set_opponent(*d, drone::TargetRef::player(0));
+        d->alert_pos = d->opp_last_known = pos;
+        d->alertness = 1.0f;
+        d->set_state(kStAttack);
+    }
+}
+
+void SpSystem::speak_line(Drone& d, int line) {
+    if (!on_sfx || line <= 0 || line >= kDroneSpeechCount || d.now() < d.seconds(0.5f)) return;
+    const auto index = std::size_t(line);
+    const DroneSpeech& cue = tables_.speech[index];
+    if (cue.effect == 0 || d.now() < next_speech_[index]) return;
+    int& handle = sx(d).speech_handle;
+    if (handle != 0 && sfx_finished && !sfx_finished(handle)) return;
+    handle = on_sfx(d, int(cue.effect));
+    if (handle != 0) next_speech_[index] = d.now() + d.seconds(float(cue.cooldown) / 60.0f);
+}
+
+void SpSystem::speak(Drone& d, Speech kind) {
+    if (!on_sfx || config_.level_id < 0x07000005 || config_.level_id > 0x07000008) return;
+    if (!d.alive() && kind != Speech::Death) return;
+    int line = 0;
+    switch (kind) {
+    case Speech::Patrol:
+        if (d.char_class != 3 || d.now() < next_patrol_speech_) return;
+        if (drones_.rand_int(2) != 0) {
+            next_patrol_speech_ = d.now() + d.seconds(5.0f);
+            return;
+        }
+        next_patrol_speech_ = d.now() + d.seconds(10.0f);
+        line = 0xb3 + int(drones_.rand_int(5));
+        break;
+    case Speech::Attack:
+        if (d.char_class == 3 && !(d.sight_flags & drone::sight::kFirstSighted))
+            line = 0xac + int(drones_.rand_int(7));
+        else if (d.char_class == 2 && drones_.rand_int(3) == 0)
+            line = 0x37 + int(drones_.rand_int(9));
+        else if (d.char_class == 0x11 && config_.level_id == 0x07000007 && drones_.rand_int(3) == 0)
+            line = 0x93 + int(drones_.rand_int(2));
+        break;
+    case Speech::SeenPlayer:
+        if (d.char_class != 0x10 && drones_.rand_int(3) == 0)
+            line = d.char_class == 2 ? 0x49 + int(drones_.rand_int(6)) : 0x21;
+        break;
+    case Speech::HeardNoise:
+        if (d.char_class == 1) line = 0x26;
+        break;
+    case Speech::CivilianScared:
+        if (sx(d).cfg.flag15) line = 0x48;
+        break;
+    case Speech::Pain:
+        switch (d.char_class) {
+        case 1: line = 0x12; break;
+        case 2: line = 0x13; break;
+        case 3: line = 0x11; break;
+        case 0xc: line = 0x1b; break;
+        case 0xe: line = 0x10; break;
+        case 0x10: line = 0x16; break;
+        case 0x12: case 0x13: line = 0x1c; break;
+        case 0x14: line = 0x10; break;
+        default: line = sx(d).cfg.flag15 ? 0x17 : 0x0f; break;
+        }
+        break;
+    case Speech::Death:
+        switch (d.char_class) {
+        case 1: line = 4; break;
+        case 2: line = 5; break;
+        case 3: line = 3; break;
+        case 0xc: line = 0xd; break;
+        case 0x10: line = 8; break;
+        case 0x12: case 0x13: line = 0xe; break;
+        case 0x14: line = 2; break;
+        default: line = sx(d).cfg.flag15 ? 9 : 1; break;
+        }
+        break;
+    case Speech::Surrender:
+    case Speech::Other:
+        break;
+    }
+    speak_line(d, line);
 }
 
 void SpSystem::set_cover(std::unique_ptr<CoverSystem> c) { cover_ = std::move(c); }
@@ -167,6 +266,7 @@ Drone* SpSystem::spawn_npc(const SpNpcSpec& spec, std::uint32_t static_index, co
     info.accuracy_class = r.accuracy;
     info.aggression = r.aggression;
     info.health = r.health;
+    info.weapon = r.weapon;
     info.side = r.side;
     info.dtype = r.dtype;
     info.char_class = r.char_class;
@@ -282,6 +382,9 @@ bool position_visible(const nf::World& world, const Vec3& pos) {
 void SpSystem::tick(nf::World& world, nf::FrameTiming) {
     attackers_prev_ = attackers_now_;   // Drone_InitComms: NPCGlobals+0x18c -> +0x170, then cleared
     attackers_now_ = 0;
+    passed_.clear();
+    music_count_ = 0;
+    if (attackers_prev_ == 0) music_active_ = false;
     if (cover_) cover_->process(*this);   // Drone_ProcessCoverNodes
     const std::uint32_t lvl = config_.level_id;
     for (std::size_t si = 0; si < spawners_.size(); ++si) {

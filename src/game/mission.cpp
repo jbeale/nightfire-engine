@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include "assets/game_files.hpp"
+#include "assets/character.hpp"
 #include "game/drone.hpp"
 #include "game/drone_system.hpp"
 #include "game/player.hpp"
@@ -102,11 +103,11 @@ void MissionSystem::apply_loadout(int slot) {
 
 MissionSystem::Inventory MissionSystem::ram_save(int slot) const {
     Inventory inv;
-    for (int id = 0; id < 128; ++id) {
+    for (int id = 1; id < WeaponTable::kWeaponCount; ++id) {
         if (!weapons_.owns(slot, id)) continue;
         inv.weapons.emplace_back(id, weapons_.clip(slot, id));
     }
-    for (int a = 0; a < 64; ++a) {
+    for (int a = 1; a < WeaponTable::kAmmoCount; ++a) {
         const int pool = weapons_.ammo_pool(slot, a);
         if (pool > 0) inv.ammo.emplace_back(a, pool);
     }
@@ -116,15 +117,22 @@ MissionSystem::Inventory MissionSystem::ram_save(int slot) const {
     return inv;
 }
 
-void MissionSystem::ram_load(int slot, const Inventory& inv) {
+void MissionSystem::ram_load(World& world, int slot, const Inventory& inv) {
     if (!inv.valid) return;
     for (const auto& [id, rounds] : inv.weapons) weapons_.give_weapon(slot, id, rounds);
-    for (const auto& [a, n] : inv.ammo) weapons_.give_ammo(slot, a, n);
-    if (inv.armour > 0) weapons_.give_armour(slot, inv.armour);
+    if (auto* state = weapons_.state(slot)) {
+        state->pool.fill(0);
+        for (const auto& [type, rounds] : inv.ammo)
+            state->pool.at(std::size_t(type)) = std::uint16_t(rounds);
+        for (const auto& [id, rounds] : inv.weapons)
+            weapons_.restore_clip(slot, id, rounds);
+    }
+    if (auto* player = world.player(slot)) player->set_armor(inv.armour);
     weapons_.select_weapon(slot, inv.selected);
 }
 
- void MissionSystem::pre_tick(World& world, const std::vector<bool>& use) {
+void MissionSystem::pre_tick(World& world, const std::vector<bool>& use, FrameTiming timing,
+                             const WeaponEvents* previous_weapon_events) {
      // Mines detonate through `WeaponSystem::explode_at` below, which needs the world for its
      // victim gather and shake; the weapon tick (which binds it) runs after this.
      weapons_.attach(world);
@@ -135,13 +143,15 @@ void MissionSystem::ram_load(int slot, const Inventory& inv) {
     std::vector<SpObjects::Toucher> touchers;
     for (int i = 0; i < World::kMaxPlayers; ++i) {
         Player* p = world.player(i);
-        if (!p || !p->alive()) continue;
+        if (!p || !p->alive() || !p->enabled()) continue;
         SpObjects::Toucher t;
         t.pos = p->pos;
         t.radius = 0.55f;
         t.height = 1.0f;
         t.is_player = true;
         t.slot = i;
+        const Vec3 base = p->pos - Vec3{0, p->stand_height - p->capsule_radius, 0};
+        t.capsule = CylinderQuery{base, p->pos + Vec3{0, 0.5f, 0}, p->capsule_radius};
         touchers.push_back(t);
     }
     if (sp_) {
@@ -157,10 +167,16 @@ void MissionSystem::ram_load(int slot, const Inventory& inv) {
         }
     }
     const float dt = 2.0f;  // pre_tick runs once per 30 Hz tick like the object updates
-    objects_->tick(touchers, use, weapons_.events(), dt, &weapons_,
+    objects_->tick(touchers, use, previous_weapon_events ? *previous_weapon_events : weapons_.events(), dt, &weapons_,
                    [&](int slot, float dmg, DamageType type, const std::array<float, 3>&) {
                        weapons_.hurt_player(slot, dmg, type, -1);
                    });
+    const auto illuminated = objects_->update_searchlights(touchers, world.collision(), timing.mul());
+    if (level_id_ == 0x07000005 && illuminated) {
+        if (sp_ && !spotlight_contact_) sp_->alert_near_spotlight(*illuminated);
+        music(2, spotlight_contact_ ? 5 : 3);
+    }
+    spotlight_contact_ = illuminated.has_value();
     // Script-driven solids (`SP_SetPosRot`): entity poses from the playing scripts become
     // movers before the players collide (one tick behind the script clock: scripts advance
     // in System::tick, after collision).
@@ -175,7 +191,12 @@ void MissionSystem::ram_load(int slot, const Inventory& inv) {
         }
     }
     objects_->update_script_entities(script_ents);
-    world.objects().set_movers(objects_->movers());
+    update_moving_geometry(world);
+    auto boxes = objects_->movers();
+    std::erase_if(boxes, [&](const Mover& m) {
+        return std::find(door_handles_.begin(), door_handles_.end(), m.id) != door_handles_.end();
+    });
+    world.objects().set_movers(std::move(boxes));
     // Import drone one-shot writes AFTER the object tick (multiplex re-eval above stores its
     // outputs unconditionally), then export the merged state so drone 1-bits stay sticky.
     if (sp_) {
@@ -188,6 +209,67 @@ void MissionSystem::ram_load(int slot, const Inventory& inv) {
         if (sp_) sp_->channels.set(i, on);
     }
 }
+void MissionSystem::update_moving_geometry(World& world) {
+    if (!moving_geometry_) {
+        moving_geometry_ = &world.objects().enable_moving_meshes();
+        for (const auto& door : objects_->doors()) {
+            const auto& p = level_.placements()[door.placement];
+            if (level_.chunks()[p.chunk].chunk.models[p.model].collision.empty()) continue;
+            moving_geometry_->add_model(level_, door.placement, p.chunk, p.model, p.transform);
+            door_handles_.push_back(door.placement);
+        }
+    }
+    for (const auto& draw : objects_->draws()) {
+        if (std::find(door_handles_.begin(), door_handles_.end(), draw.placement) != door_handles_.end())
+            moving_geometry_->move_model(draw.placement, draw.transform);
+    }
+    if (level_id_ != 0x07000005 || !character_bank_) return;
+    // The truck's rigid chassis is driven by bone 4 in its authored cutscene skin.
+    constexpr std::uint32_t truck_skin = 0x05000005, chassis_hash = 0x020003BE;
+    const auto actors = script_actors();
+    const auto pose = std::find_if(actors.begin(), actors.end(),
+                                   [](const auto& actor) { return actor.skin == truck_skin; });
+    if (pose == actors.end()) return;
+    parked_truck_pose_ = *pose;
+    if (!truck_) {
+        const auto* skin = character_bank_->skin(truck_skin);
+        if (!skin) return;
+        auto actor = std::make_unique<CharacterInstance>(*character_bank_, *skin);
+        actor->extract_root_motion(false);
+        if (!actor->play(pose->script, false)) return;
+        truck_ = std::move(actor);
+    }
+    truck_->set_frame(pose->frame);
+    const Mat4 next = truck_->bone_world(4);
+    if (!truck_handle_) {
+        for (std::size_t c = 0; c < level_.chunks().size(); ++c) {
+            const auto& models = level_.chunks()[c].chunk.models;
+            for (std::size_t m = 0; m < models.size(); ++m) {
+                if (std::uint32_t(models[m].hash) != chassis_hash || models[m].collision.empty()) continue;
+                truck_handle_ = level_.placements().size();
+                moving_geometry_->add_model(level_, *truck_handle_, c, m, next);
+                return;
+            }
+        }
+        return;
+    }
+    if (Player* player = world.player(0); player && player->enabled() && player->jump_state == 0 &&
+        (player->substate == SubState::Walk || player->substate == SubState::Crouch)) {
+        const Vec3 sole = player->pos - Vec3{0, player->stand_height, 0};
+        const Vec3 from = sole + Vec3{0, 0.2f, 0}, to = sole - Vec3{0, 0.3f, 0};
+        const auto support = moving_geometry_->ray(from, to, pick::kIgnoreGhost);
+        if (support && support->placement == *truck_handle_ && support->normal[1] > 0.5f) {
+            const auto ground = world.collision().ray(from, to, pick::kIgnoreGhost);
+            if (!ground || ground->dist >= support->dist - 0.02f) {
+                const Vec3 carried = moving_geometry_->carry_point(*truck_handle_, next, player->pos);
+                player->settled_pos += carried - player->pos;
+                player->pos = carried;
+            }
+        }
+    }
+    moving_geometry_->move_model(*truck_handle_, next);
+}
+
 void MissionSystem::play_script(std::uint32_t hash) {
     for (const auto& [h, bin] : scripts_) {
         if (h != hash) continue;
@@ -203,7 +285,6 @@ void MissionSystem::play_script(std::uint32_t hash) {
 void MissionSystem::tick(World& world, FrameTiming timing) {
     ++frame_;
     stats_.frames++;
-    world_ = &world;
     // Import drone-side writes (spawner completion, deaths, mission states) before evaluating.
     if (sp_) {
         for (int i = 0; i < 256; ++i)
@@ -230,11 +311,13 @@ void MissionSystem::tick(World& world, FrameTiming timing) {
     const float frames = timing.mul();  // 60 Hz frames this tick (2.0 at 30 Hz)
     for (auto& p : players_) {
         if (p->playing()) p->tick(frames);
+        if (auto handoff = p->take_handoff(); handoff && player_disabled_)
+            player_handoff_ = handoff;
     }
     // Route object + player queues into the hooks/queues.
     for (const SoundRequest& s : objects_->take_sounds()) {
         Vec3 pos{s.pos[0], s.pos[1], s.pos[2]};
-        sounds_.push_back({s.id, pos, s.positional});
+        sounds_.push_back({{s.id, pos, s.positional}});
         if (hooks_.sound) hooks_.sound(s.id, pos, s.positional);
     }
     for (const SpObjects::Text& t : objects_->take_texts()) {
@@ -245,31 +328,38 @@ void MissionSystem::tick(World& world, FrameTiming timing) {
         music_.push_back({int(ev), 2});
         if (hooks_.music) hooks_.music(int(ev), 2);
     }
-    for (auto& p : players_) {
+    for (std::size_t i = 0; i < players_.size(); ++i) {
+        auto& p = players_[i];
         for (const auto& s : p->take_sounds()) {
-            Vec3 pos{s.pos[0], s.pos[1], s.pos[2]};
-            sounds_.push_back({s.id, pos, s.positional});
-            if (hooks_.sound) hooks_.sound(s.id, pos, s.positional);
-        }
-        for (const auto& m : p->take_messages()) {
-            texts_.push_back({m.label, int(m.frames), 4});
-            if (hooks_.message) hooks_.message(m.label, int(m.frames), 4);
-        }
-        for (const auto& m : p->take_music()) {
-            music_.push_back({int(m.id), m.value});
-            if (hooks_.music) hooks_.music(int(m.id), m.value);
+            sounds_.push_back({s, i + 1});
+            if (hooks_.sound && s.action == CutscenePlayer::SoundAction::Start)
+                hooks_.sound(s.id, s.pos, s.positional);
         }
         for (const auto& l : p->take_lights()) lights_.push_back({l.pos, l.intensity, l.type});
     }
-    // Re-enable the player when no cutscene holds it. Player death fails the mission.
-    if (player_disabled_) {
-        bool any = false;
-        for (auto& p : players_)
-            if (p->playing()) any = true;
-        if (!any && world.player(0)) {
-            world.player(0)->enable();
-            player_disabled_ = false;
+    // Background script players may stay active after the cutscene hands control back.
+    const bool lock_player = std::any_of(players_.begin(), players_.end(),
+                                         [](const auto& script) { return script->locks_player(); });
+    if (Player* player = world.player(0); player && lock_player != player_disabled_) {
+        if (lock_player) player->disable();
+        else {
+            if (player->alive()) {
+                if (player_handoff_) {
+                    player->enable_at(player_handoff_->position, player_handoff_->yaw);
+                    if (player_handoff_->mode != 0) player->attach_near_script_wall(world.collision());
+                } else {
+                    player->enable();
+                }
+            }
+            player_handoff_.reset();
         }
+        player_disabled_ = lock_player;
+    }
+    const bool lock_drones = std::any_of(players_.begin(), players_.end(),
+                                         [](const auto& script) { return script->locks_drones(); });
+    if (lock_drones != drones_disabled_) {
+        enable_drones(!lock_drones);
+        drones_disabled_ = lock_drones;
     }
     if (world.player(0) && !world.player(0)->alive() && state_ == State::Playing) {
         state_ = State::Failed;  // `byte_26FCF0` (`Player_CheckForDeath`): fail label 0x04000034
@@ -299,7 +389,7 @@ void MissionSystem::tick(World& world, FrameTiming timing) {
 void MissionSystem::monitor_objectives() {
     // `Mission_MonitorObjectives`: every objective's channel feeds the all-set AND; state
     // transitions announce/complete/fail with the original's labels and timings.
-    bool all = true;
+    bool all = !entry_.has_later_objectives;
     for (Objective& o : objectives_) {
         const bool held = o.def.channel != 0 && channels_.on(int(o.def.channel));
         const bool v19 = o.def.inverted() ? !held : held;
@@ -371,6 +461,18 @@ const std::vector<Mover>& MissionSystem::movers() const { return objects_->mover
 const std::vector<SpObjects::DrawOverride>& MissionSystem::draws() const { return objects_->draws(); }
 const std::vector<std::size_t>& MissionSystem::hides() const { return objects_->hides(); }
 
+std::vector<CutscenePlayer::ActorPose> MissionSystem::script_actors() const {
+    std::vector<CutscenePlayer::ActorPose> actors;
+    for (const auto& script : players_) {
+        const auto poses = script->actors();
+        actors.insert(actors.end(), poses.begin(), poses.end());
+    }
+    if (parked_truck_pose_ && std::none_of(actors.begin(), actors.end(), [&](const auto& actor) {
+            return actor.skin == parked_truck_pose_->skin;
+        })) actors.push_back(*parked_truck_pose_);
+    return actors;
+}
+
 std::vector<MissionSystem::Sound> MissionSystem::take_sounds() {
     std::vector<Sound> out;
     out.swap(sounds_);
@@ -433,8 +535,16 @@ void MissionSystem::spawn_drone(const std::array<float, 3>& pos, const std::uint
 void MissionSystem::enable_drones(bool enable) {
     if (!sp_) return;  // `Drone_EnableAll`: without Bots there is nothing to freeze
     for (drone::Drone* d : sp_->sp_drones()) {
-        if (d) sp::enable_drone(*d, enable);
+        if (!d) continue;
+        if (enable) {
+            if (std::find(suspended_drones_.begin(), suspended_drones_.end(), d->id) != suspended_drones_.end())
+                sp::enable_drone(*d, true);
+        } else if (!d->ghost && !d->hidden) {
+            suspended_drones_.push_back(d->id);
+            sp::enable_drone(*d, false);
+        }
     }
+    if (enable) suspended_drones_.clear();
 }
 
 void MissionSystem::break_near(const std::array<float, 3>& pos) { objects_->break_near(pos); }
@@ -449,14 +559,6 @@ void MissionSystem::set_scriptcam(std::uint32_t id) { scriptcam_ = id; }
 
 void MissionSystem::camera_mode(std::uint32_t mode) { (void)mode; }  // `Player_Cam2Mode`: HUD-side
 
-void MissionSystem::disable_player(bool disable) {
-    player_disabled_ = disable;
-    if (world_ && world_->player(0)) {
-        if (disable) world_->player(0)->disable();
-        else world_->player(0)->enable();
-    }
-}
-
 void MissionSystem::fail_mission(std::uint32_t label) {
     if (state_ != State::Playing) return;
     state_ = State::Failed;
@@ -467,7 +569,7 @@ void MissionSystem::fail_mission(std::uint32_t label) {
 
 void MissionSystem::ram_save() {
     // `Player_RamSave`: snapshot slot 0 for the next level (carried by the frontend).
-    (void)ram_save(0);
+    carried_inventory_ = ram_save(0);
 }
 
 void MissionSystem::text(std::uint32_t label, std::uint16_t frames) {
@@ -475,11 +577,6 @@ void MissionSystem::text(std::uint32_t label, std::uint16_t frames) {
     if (hooks_.message) hooks_.message(label, int(frames), 4);
 }
 
-void MissionSystem::sound(std::uint32_t id, const std::array<float, 3>& pos, bool positional) {
-    Vec3 p{pos[0], pos[1], pos[2]};
-    sounds_.push_back({id, p, positional});
-    if (hooks_.sound) hooks_.sound(id, p, positional);
-}
 
 void MissionSystem::fade(float seconds) {
     // `Camera_SetFade(4, 255, 0, -t)`: positive data fades out, negative fades in [INFERENCE].

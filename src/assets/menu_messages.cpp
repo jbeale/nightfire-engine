@@ -17,7 +17,7 @@ bool common(std::uint32_t t) { return in(t, {kExitLoop, kPlayScript, kAttachScri
 // Label_SendMessage, shared by labels, buttons and radios.
 bool label_message(std::uint32_t t) {
     return in(t, {kSetText, kSetColor, kSetSelectedColor, kSetNormalColor, kSetFormat, kSetSprite, kSetOutlineColor, kSetUv,
-                  kOutline, kPulse, 0x76, kGetColor});
+                  kOutline, kLabelSpriteFlags, kPulse, 0x76, kGetColor});
 }
 
 }  // namespace

@@ -55,8 +55,7 @@ void main() {
     // clamped to 255 before the GS modulates the texture with it (0x80 = 1.0).
     vec3 world = (u_world * vec4(skinned, 1.0)).xyz;
     vec3 n = mat3(u_world) * (w0 * (mat3(m0) * a_normal) + w1 * (mat3(m1) * a_normal)) * (127.0 / 128.0);
-    // Environment-mapped models (box 0 flags bit 0): the VU program builds ST from the camera axes
-    // (FillMatrixChainRot/Skin upload them with a 0.5 bias) instead of the vertex UVs.
+    // Environment-mapped rigid parts build ST from the camera axes that FillMatrixChainRot uploads.
     v_uv = mix(a_uv, vec2(dot(n, u_cam_right), dot(n, u_cam_up)) + 0.5, u_env);
     vec3 colour = u_tint * 255.0;
     for (int i = 0; i < u_lights; ++i) {
@@ -195,7 +194,7 @@ CharacterRenderer::GpuMesh& CharacterRenderer::skinned_mesh(ModelRef ref) {
         if (gb.count) out.batches.push_back(gb);
     }
     if (mesh.morph_targets) out.morph_source = &mesh;
-    out.envmap = mesh.envmap;
+    // The skinned VU path uses the chain's authored ST regardless of the box flag.
     if (!verts.empty()) upload(out, std::move(verts));
     return out;
 }
@@ -285,8 +284,8 @@ void CharacterRenderer::draw(const Camera& cam, float aspect, const SkinDef& ski
     glUniform3f(u_tint_, lighting.tint[0], lighting.tint[1], lighting.tint[2]);
     glUniform1f(u_alpha_, lighting.alpha);
     const bool fade = lighting.alpha < 1.0f;
-    // Environment mapping (box 0 flags bit 0): the VU program builds ST from these uploads. FillMatrixChainRot /
-    // FillMatrixChainSkin upload viewer view-matrix rows 0/1 (unit camera axes: viewer_tag+0x120 is a matrix,
+    // Environment mapping (box 0 flags bit 0): the VU program builds ST from these uploads. FillMatrixChainRot
+    // uploads viewer view-matrix rows 0/1 (unit camera axes: viewer_tag+0x120 is a matrix,
     // see MatrixBond2PS2_2 in PS2WorldViewVU1Kick2) scaled by 1/256 with a 0.5 bias, reproduced here verbatim:
     // the sweep is tiny on purpose, pinning each surface near its texture's centre texel (matte finish).
     const Vec3 right = cam.right(), raw_up = cross(right, cam.forward());

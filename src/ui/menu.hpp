@@ -89,6 +89,7 @@ struct DrawCmd {
     std::uint32_t hash = 0;          // image
     Rect dst, src;
     Color color;
+    Blend blend = Blend::Alpha;
     std::string text;                // text
     TextStyle style;
     float x = 0, y = 0;
@@ -126,6 +127,7 @@ struct LabelState {
     std::uint32_t color = 0x7F7F7FC0;                  // +0xb4 current sprite colour
     std::uint32_t pulse_base = 0x808080FF;             // +0x104 (0x29)
     std::uint16_t u = 0, v = 0, uw = 0, vh = 0;        // +0xd4..0xda (0x2d)
+    std::uint16_t sprite_flags = 0;                    // +0xec (0x6c)
     bool outline = true;                               // +0x10e (0x62)
     bool pulse = false;                                // +0x10f (0x70)
     bool always_selected = false;                      // +0x110 (0x76)

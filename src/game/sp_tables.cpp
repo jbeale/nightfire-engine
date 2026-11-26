@@ -103,6 +103,13 @@ SpTables SpTables::load(const nf::Elf32& elf) {
         const nf::Bytes w = elf.at(kStatWidthsAddr, 32);
         for (std::size_t i = 0; i < 8; ++i) t.stat_widths[i] = nf::load<std::uint32_t>(w, i * 4);
     }
+    if (const auto table = elf.symbol("Drone_SfxInfo")) {
+        const nf::Bytes rows = elf.at(table->value, kDroneSpeechCount * 0x20);
+        for (std::size_t i = 0; i < t.speech.size(); ++i) {
+            const std::size_t offset = i * 0x20;
+            t.speech[i] = {nf::load<std::uint32_t>(rows, offset), nf::load<std::uint32_t>(rows, offset + 0x0c)};
+        }
+    }
     const auto set_prop = elf.symbol("behaviour_util_setProperty__FiPUiUi");
     const auto defaults = elf.symbol("NDrone2_init_DMODE_Defaults__FP9Drone_tag");
     if (!set_prop || !defaults) throw nf::FormatError("ACTION.ELF has no behaviour_util_setProperty / init_DMODE_Defaults");
@@ -751,6 +758,7 @@ NpcResolved resolve_npc(const SpNpcSpec& spec, const ResolveEnv& env, DroneStats
     else do_mode_settings_new(r, spec, env, stats);
     if (spec.mode < 0x24) do_type_settings_old(r, env, r.dtype);   // Drone+0x32 != 0: NDrone2_DoTypeSettingsOLD
     anim62 = anim62_mode;
+    r.weapon = anim62;
 
     // -- captains (behaviour bits 9 / 5 / 8 by difficulty) --
     r.captain = false;

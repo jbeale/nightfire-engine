@@ -15,23 +15,7 @@ namespace {
 
 int skeleton(Drone& d, const Msg& m) { return skel_common(d, m, kStAttack) ? 1 : 0; }
 
-// ---- Death_Anim 0x44 / DeathByExplosion 0x45 / SpecialDeath_Anim 0x46 -------------------------------
-// NDrone2_BulletImpact routes here at health <= 0 (DroneFunc_OnInitDeath ran first).
-int state_death_anim(Drone& d, const Msg& m) {
-    switch (m.id) {
-    case kMsgNone:
-        return 1;
-    case kMsgEnter:
-        notify_death(d);   // DroneFunc_SetDeathChannel: switch_channels[Drone+0x13c]
-        talk(d, Speech::Death);
-        return 1;
-    case kMsgTick:
-        return 1;
-    default:
-        return 1;   // the dead ignore the world
-    }
-}
-
+// ---- DeathByExplosion 0x45 / SpecialDeath_Anim 0x46 -----------------------------------------------
 int state_death_by_explosion(Drone& d, const Msg& m) {
     switch (m.id) {
     case kMsgNone:
@@ -864,7 +848,6 @@ int state_wait_forever(Drone&, const Msg& m) {
 
 void register_special_states() {
     using drone::register_state;
-    register_state(kStDeath_Anim, "Death_Anim", state_death_anim);
     register_state(kStDeathByExplosion, "DeathByExplosion", state_death_by_explosion);
     register_state(kStSpecialDeath_Anim, "SpecialDeath_Anim", state_special_death_anim);
     register_state(kStDead, "Dead", state_dead);

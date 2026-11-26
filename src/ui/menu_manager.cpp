@@ -743,7 +743,9 @@ void MenuManager::draw(Renderer& renderer, TextRenderer& text) const {
                 dst.x = layout.x(dst.x + (left_anchor ? 0.0f : dst.w),
                                  left_anchor ? HorizontalAnchor::Left : HorizontalAnchor::Right) -
                         (left_anchor ? 0.0f : dst.w);
-            renderer.draw(d.hash, dst, d.src, d.color);
+            if (d.blend != Blend::Alpha) renderer.set_blend(d.blend);
+            renderer.draw(d.hash, dst, d.src, d.color, frame_);
+            if (d.blend != Blend::Alpha) renderer.set_blend(Blend::Alpha);
         }
     }
 }

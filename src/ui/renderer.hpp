@@ -55,13 +55,16 @@ public:
 
     // Draws `src` (texel rectangle; negative w/h mirrors) of the texture `hash` into `dst`.
     // Returns false (drawing nothing) when the hash is not in the sprite library.
-    bool draw(std::uint32_t hash, Rect dst, Rect src, Color color);
+    bool draw(std::uint32_t hash, Rect dst, Rect src, Color color, std::uint64_t tick = 0);
     // The whole texture.
     bool draw(std::uint32_t hash, Rect dst, Color color);
     void fill(Rect dst, Color color);
     // Live video frame (movie playback): uploads/replaces the single dynamic texture and draws
     // it over `dst`. Pixels are R-in-low-byte RGBA, like the sprite library.
     void draw_frame(Rect dst, int width, int height, const std::uint32_t* rgba);
+    // Copy the rendered game viewport before swapping, then draw it across the UI viewport.
+    void capture_backdrop(int x, int y, int width, int height);
+    void draw_backdrop();
 
     // Texture size in texels, or {0,0} when missing.
     std::pair<std::uint32_t, std::uint32_t> texture_size(std::uint32_t hash) const;
@@ -78,6 +81,7 @@ private:
 
     const SpriteLibrary& sprites_;
     GLuint program_ = 0, vao_ = 0, vbo_ = 0, white_ = 0, bound_ = 0, frame_ = 0;
+    GLuint backdrop_ = 0;
     int frame_w_ = 0, frame_h_ = 0;
     float canvas_w_ = kScreenW;
     bool pillarbox_ = false;

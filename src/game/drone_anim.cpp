@@ -234,11 +234,23 @@ void anim_update(Drone& d) {
     if (!data) return;
     Drone::Anim& a = d.anim;
     d.mv.root_motion = {};
+    if (d.alive() || d.mv.disabled) {
+        d.death_start_root_height.reset();
+    } else if (!d.is_bot() && d.character && !d.death_start_root_height) {
+        d.death_start_root_height = d.character->root_height();
+    }
+    if (d.death_start_root_height && (d.smi.cur == kStateDead || d.smi.cur == kStateFade)) return;
 
     // DroneAnim_CheckForAnimComplete / SetEndAnim: a non-looping clip finished -> chained anim, or complete.
     if (a.clip_running && d.character && d.character->finished()) {
         a.clip_running = false;
-        if (a.next_anim != 0) {
+        if (!d.is_bot() && a.end_state == kStateDead) {
+            // Hold the final death pose when its completion state is a corpse.
+            a.next_anim = 0;
+            a.req_state = 0;
+            call_complete(d);
+            return;
+        } else if (a.next_anim != 0) {
             set_anim(d, a.next_anim, 8);
         } else {
             call_complete(d);
@@ -252,7 +264,10 @@ void anim_update(Drone& d) {
     if (a.req_state != 0) {
         int blend = a.req_blend, flag = 0;
         std::uint16_t id = data->anim_for(a.cur_state, a.req_state, a.req_variant, &blend, &flag);
-        if (id == 0xffff || id == 0) {
+        const auto can_play = [&](std::uint16_t anim) {
+            return anim != 0xffff && anim != 0 && data->script(anim, d.sub_class) != 0;
+        };
+        if (!can_play(id)) {
             // GetDAnimForCall fallback: no transition record from the current anim (always the case on a
             // cold start from kUndefined) -> the requested state's default clip. Without this no drone anim
             // ever starts and locomotion (anim root motion) never engages.
@@ -266,11 +281,18 @@ void anim_update(Drone& d) {
         const int state = a.req_state;
         const int end_state = a.req_end_state, end_msg = a.req_end_msg;
         a.req_state = 0;
-        if (id != 0xffff && id != 0) {
+        if (can_play(id)) {
             a.end_state = end_state;
             a.end_msg = end_msg;
-            set_anim(d, id, blend > 0 ? blend : 8);
+            // A repeated aim request may select the draw clip that is already finishing.
+            // Let it reach its authored next clip instead of restarting the draw every tick.
+            if (id != a.cur_anim || !a.clip_running) set_anim(d, id, blend > 0 ? blend : 8);
             if (a.cur_state == 0) a.cur_state = state;
+        } else {
+            // A missing transition clip must release the caller's completion path.
+            a.end_state = end_state;
+            a.end_msg = end_msg;
+            call_complete(d);
         }
     }
 

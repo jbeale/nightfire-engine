@@ -148,6 +148,12 @@ public:
     void set_bank(CharacterBank* bank) { bank_ = bank; }
     void set_drone_system(const drone::DroneSystem* drones) { drones_ = drones; }   // threat gate for idle fidgets; null = none
     void set_match_rules(MatchRules* rules) { rules_ = rules; }
+    using SceneryHit = std::function<void(std::size_t placement, float damage, std::uint16_t weapon_class, int attacker)>;
+    using SceneryBlast = std::function<void(const Vec3& position, float radius, float damage, int attacker)>;
+    void set_scenery_callbacks(SceneryHit hit, SceneryBlast blast) {
+        scenery_hit_ = std::move(hit);
+        scenery_blast_ = std::move(blast);
+    }
     // The world the shooters live in; tick() attaches it too, call this earlier when fire()/spawn_player() run before the first tick.
     void attach(World& world) { world_ = &world; }
     // Multiplayer view RNG runs after bot systems, matching Player_LaserPointer's source frame order.
@@ -166,6 +172,7 @@ public:
         bool owner_aiming = false;
         int shots_in_burst = 0;
         float damage_scale = 1.0f;   // multiplies the direct and blast damage of this shot (Drone_ModBulletDamage)
+        int ignored_target = -1;
     };
     struct LagCompVolume {
         int id = -1;
@@ -179,7 +186,7 @@ public:
     };
     using LagCompProvider = std::function<LagCompVolumes(int shooter)>;
     void set_lag_comp_provider(LagCompProvider provider) { lag_comp_provider_ = std::move(provider); }
-    void fire(const Shooter& shooter, int weapon_id);
+    void fire(const Shooter& shooter, int weapon_id, int sound_override = 0);
     // Explode_Create at `position` with the weapon's radius and damage.
     void explode(const Vec3& position, int weapon_id, int attacker);
     // Same, with an explicit def (map mines author their own radius/damage per placement).
@@ -208,6 +215,7 @@ public:
     bool owns(int slot, int weapon_id) const;
     int clip(int slot, int weapon_id) const;               // Player_AmmoInGun
     int ammo_pool(int slot, int ammo_type) const;
+    void restore_clip(int slot, int weapon_id, int rounds);
     bool aiming(int slot) const;
     float zoom(int slot) const;                            // current zoom factor (BLData+2256)
     // Fills the weapon/aiming/ammo fields of the HUD state for the UI slice (HUD_UpdateAmmoPane,
@@ -257,6 +265,7 @@ private:
         int victim = -1;        // Victim::id
         DamageTarget* target = nullptr;
         int part = bodypart::kNone;
+        std::size_t scenery = SIZE_MAX;
     };
 
     void ensure_player(int slot, World& world);
@@ -301,7 +310,7 @@ private:
     void detonate_owned(int owner, int weapon_id);  // explode every live projectile of the pair (detonators)
     void update_owner_locks(World& world);           // guided / weapon-lock projectiles freeze their owner
     SegmentHit trace_segment(const World& world, const Vec3& from, const Vec3& to, int owner,
-                             const std::vector<Victim>& victims, bool solid_water = false) const;
+                             const std::vector<Victim>& victims, bool solid_water = false, int ignored_target = -1) const;
     void bullet_hit(Projectile& b, const SegmentHit& hit, const WeaponDef& def, const Vec3& dir);
     void hurt_victim(int victim_id, DamageTarget* target, const HitInfo& hit);
     void damage_player(int slot, const HitInfo& hit);
@@ -318,6 +327,8 @@ private:
     std::array<std::unique_ptr<PlayerWeapons>, World::kMaxPlayers> players_;
     std::array<SpawnLoadout, World::kMaxPlayers> loadouts_{};
     std::vector<DamageTarget*> targets_;
+    SceneryHit scenery_hit_;
+    SceneryBlast scenery_blast_;
     std::vector<int> target_ids_;
     int next_target_id_ = World::kMaxPlayers;
     std::vector<Projectile> projectiles_;

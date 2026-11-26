@@ -50,6 +50,11 @@ public:
     // `sole` (same +-0.3 window as ride_displacement). Without this the capsule can rest on a
     // lift while kOnGround stays clear (fall timer never resets).
     bool standing_on_mover(const Vec3& sole, float radius) const;
+    void enable_scenery(Level& level);
+    CollisionWorld* scenery() { return scenery_ ? &*scenery_ : nullptr; }
+    const CollisionWorld* scenery() const { return scenery_ ? &*scenery_ : nullptr; }
+    CollisionWorld& enable_moving_meshes() { return moving_meshes_.emplace(); }
+    const CollisionWorld* moving_meshes() const { return moving_meshes_ ? &*moving_meshes_ : nullptr; }
 
     // `switch_channels`: 1 byte per channel, ids beyond the array read as clear.
     static constexpr std::size_t kChannels = 256;
@@ -64,6 +69,8 @@ public:
 
 private:
     CollisionWorld solids_;
+    std::optional<CollisionWorld> scenery_;
+    std::optional<CollisionWorld> moving_meshes_;
     CollisionWorld zones_;
     std::vector<LadderObject> ladders_;
     std::vector<CreepWallObject> creep_walls_;

@@ -29,6 +29,8 @@ CutscenePlayer::CutscenePlayer(const CutsceneBin* bin, std::uint32_t id, Host* h
     for (const CutsceneScript& s : bin->scripts) {
         Stream st;
         st.cmds = decode_stream(s);
+        st.entity_first = s.id;
+        st.entity_last = s.flags;
         streams_.push_back(std::move(st));
     }
 }
@@ -41,16 +43,40 @@ void CutscenePlayer::play(bool fast) {
         s.next = 0;
         s.done = false;
         s.has_entity = false;
+        s.actor = {};
+        s.sound_id = 0;
+        s.sound_source = -1;
         s.has_camera = false;
         s.camera_live = false;
     }
     time_ = 0;
     playing_ = true;
+    locks_player_ = false;
+    locks_drones_ = false;
+    handoff_.reset();
 }
 
 void CutscenePlayer::stop() {
+    for (Stream& stream : streams_) cue_sound(stream, SoundAction::End);
     playing_ = false;
     host_->set_scriptcam(0);
+}
+
+void CutscenePlayer::cue_sound(Stream& stream, SoundAction action) {
+    if (stream.sound_id == 0) return;
+    Sound cue;
+    cue.id = stream.sound_id;
+    cue.stream = std::uint16_t(&stream - streams_.data());
+    cue.action = action;
+    if (action != SoundAction::End && stream.sound_source >= 0) {
+        const Stream& source = streams_[std::size_t(stream.sound_source)];
+        cue.positional = true;
+        cue.pos = source.epos;
+        cue.actor = source.actor;
+        if (cue.actor.skin != 0) cue.actor.frame += source.time - source.entity_start;
+    }
+    sounds_.push_back(cue);
+    if (action == SoundAction::End) stream.sound_id = 0;
 }
 
 std::size_t CutscenePlayer::key_count() const { return bin_->keys.size() / 48; }
@@ -98,6 +124,9 @@ void CutscenePlayer::interpolate(Stream& s) {
     if (s.has_camera && s.key_begin <= s.key_end && s.key_end < n) {
         begin = s.key_begin;
         end = s.key_end;
+    } else if (s.has_entity && s.entity_first <= s.entity_last && s.entity_last < n) {
+        begin = s.entity_first;
+        end = s.entity_last;
     }
     if (begin >= end) {
         if (s.has_camera) {
@@ -106,6 +135,11 @@ void CutscenePlayer::interpolate(Stream& s) {
             s.eye = p;
             s.forward = {2 * (q[0] * q[2] + q[3] * q[1]), 2 * (q[1] * q[2] - q[3] * q[0]),
                          1 - 2 * (q[0] * q[0] + q[1] * q[1])};
+            s.fov = std::clamp(key_aux(begin) * (4.0f / 3.0f), 0.1f, 2.5f);
+        }
+        if (s.has_entity) {
+            s.epos = key_pos(begin);
+            s.equat = key_quat(begin);
         }
         return;
     }
@@ -117,7 +151,7 @@ void CutscenePlayer::interpolate(Stream& s) {
     const auto qa = key_quat(std::size_t(seg.i1)), qb = key_quat(std::size_t(seg.i2));
     const auto q = slerp_acc(qa, qb, seg.f);
     std::array<float, 3> p;
-    float fov = 60.0f;
+    float fov = 0.7853982f;
     if (s.spline) {
         const auto w = spline_weights(seg.f);
         const auto p0 = key_pos(std::size_t(seg.i0)), p3 = key_pos(std::size_t(seg.i3));
@@ -133,7 +167,7 @@ void CutscenePlayer::interpolate(Stream& s) {
         s.eye = p;
         s.forward = {2 * (q[0] * q[2] + q[3] * q[1]), 2 * (q[1] * q[2] - q[3] * q[0]),
                      1 - 2 * (q[0] * q[0] + q[1] * q[1])};
-        s.fov = fov;  // +32 blended fov (`SCRIPTINFO` +148 scale is 1.0)
+        s.fov = std::clamp(fov * (4.0f / 3.0f), 0.1f, 2.5f);
     }
     if (s.has_entity) {
         s.epos = p;
@@ -145,24 +179,34 @@ void CutscenePlayer::fire(const ScriptCommand& cmd, Stream& s) {
     const auto& p = cmd.payload;
     switch (CutsceneOp(cmd.op)) {
     case CutsceneOp::EntityStart: {
-        // dword entity hash + b0 mode + b1 obj ref + b2 spline + b3 kind + b4 extra-dword count.
+        // dword entity hash + parent flag/index + spline flag + kind + extra-dword count.
         s.has_entity = true;
         s.entity_hash = payload_u32(p, 0);
-        s.obj_ref = p[2] != 0 ? int(p[3]) : -1;
-        s.spline = p[4] != 0;
+        s.obj_ref = p[4] != 0 ? int(p[5]) : -1;
+        s.spline = p[6] != 0;
         s.entity_start = s.time;
+        interpolate(s);
         break;
     }
     case CutsceneOp::EntityEnd:
         s.has_entity = false;
         s.obj_ref = -1;
         break;
+    case CutsceneOp::AnimStart:
+        s.actor = {payload_u32(p, 4), payload_u32(p, 0), float(payload_u32(p, 8))};
+        s.entity_start = s.time;
+        break;
+    case CutsceneOp::AnimEnd:
+        s.actor = {};
+        break;
     case CutsceneOp::CameraStart: {
         // u8 mode + u16 key start + u16 key end (`ScriptCam` = this script while live).
         s.has_camera = true;
         s.camera_live = true;
         s.key_begin = payload_u16(p, 1);
-        s.key_end = payload_u16(p, 3);
+        s.spline = p[0] != 0;
+        const auto end = payload_u16(p, 3);
+        s.key_end = end > 0 ? end - 1 : 0;
         host_->set_scriptcam(id_);
         host_->music(11, std::int32_t(id_));  // kNisStarted
         break;
@@ -174,27 +218,24 @@ void CutscenePlayer::fire(const ScriptCommand& cmd, Stream& s) {
         break;
     case CutsceneOp::TextStart:
         host_->text(payload_u32(p, 0), payload_u16(p, 4));
-        messages_.push_back({payload_u32(p, 0), payload_u16(p, 4)});
         break;
     case CutsceneOp::SoundStart: {
-        const std::uint32_t id = payload_u32(p, 0);
-        const bool two_d = p[1] == 1;
-        std::array<float, 3> at{};
-        bool positional = false;
-        if (!two_d && p[2] != 0) {
-            // 3D at the addressed entity when it is up.
-            for (const Stream& o : streams_) {
-                if (o.has_entity && o.obj_ref == int(p[2])) {
-                    at = key_pos(0);  // entity origin; poses refine in entities()
-                    positional = true;
-                    break;
-                }
-            }
-        }
-        host_->sound(id, at, positional);
-        sounds_.push_back({id, at, positional});
+        cue_sound(s, SoundAction::End);
+        s.sound_id = payload_u32(p, 0) & 0xFFFFF;
+        // Script_SoundStart addresses a stream by its directory index. With no explicit
+        // index it uses the script's last object, and an absent object falls back to 2D.
+        const std::size_t stream = std::size_t(&s - streams_.data());
+        const std::size_t source = p[5] != 0 ? p[6] : (stream != 0 ? stream - 1 : 0);
+        s.sound_source = -1;
+        if (p[4] == 0 && source < streams_.size() &&
+            (streams_[source].has_entity || streams_[source].actor.skin != 0))
+            s.sound_source = int(source);
+        cue_sound(s, SoundAction::Start);
         break;
     }
+    case CutsceneOp::SoundEnd:
+        cue_sound(s, SoundAction::End);
+        break;
     case CutsceneOp::FadeStart: {
         float seconds = payload_f32(p, 0);
         host_->fade(seconds);
@@ -202,37 +243,44 @@ void CutscenePlayer::fire(const ScriptCommand& cmd, Stream& s) {
     }
     case CutsceneOp::Event: {
         const std::uint8_t ev = p[1];
-        const std::size_t nargs = (p.size() - 3) / 4;
+        const std::size_t nargs = p[0];
         auto arg = [&](std::size_t k) { return nargs > k ? payload_u32(p, 2 + 4 * k) : 0; };
-        // The v14 object = this stream's entity position (0 when none).
-        std::array<float, 3> at{};
-        if (s.has_entity && key_count() > 0) at = key_pos(0);
+        // The event addresses the object in the previous stream.
+        const Stream* marker = &s != streams_.data() ? &s - 1 : nullptr;
+        const Vec3* at = marker && marker->has_entity ? &marker->epos : nullptr;
         switch (ev) {
         case 3:  // loop/restart bookkeeping: nothing to present
             break;
         case 4:
-            host_->disable_player(true);
+            locks_player_ = true;
             break;
         case 5:
-            host_->enable_drones(false);  // `Drone_EnableAll(0, ...)`
+            locks_drones_ = true;
             break;
-        case 6:  // save anchor matrix: camera holds
+        case 6: {  // Script_EventHandler uses the previous stream's object matrix.
+            if (at) {
+                const auto& q = marker->equat;
+                const float yaw = std::atan2(2 * (q[0] * q[2] + q[3] * q[1]),
+                                             1 - 2 * (q[0] * q[0] + q[1] * q[1]));
+                handoff_ = PlayerHandoff{*at, yaw, std::uint8_t(arg(0))};
+            }
             break;
+        }
         case 7:  // flag 0x80 (NIS skip arm): nothing to present
             break;
         case 8: {  // `Drone_CoderCreate` at the object: spawn a drone with 4 args
             const std::uint32_t args[4] = {arg(0), arg(1), arg(2), arg(3)};
-            host_->spawn_drone(at, args);
+            if (at) host_->spawn_drone(*at, args);
             break;
         }
         case 9:
             host_->camera_mode(arg(0));  // `Player_Cam2Mode`
             break;
         case 10:
-            host_->break_near(at);  // `Break_DoBreak`
+            if (at) host_->break_near(*at);  // `Break_DoBreak`
             break;
         case 11:
-            host_->set_link_byte(at, std::uint8_t(arg(0) & 0xFF));
+            if (at) host_->set_link_byte(*at, std::uint8_t(arg(0) & 0xFF));
             break;
         case 12:  // flag 0x10: nothing to present
         case 14:  // stream flag: nothing to present
@@ -262,8 +310,6 @@ void CutscenePlayer::fire(const ScriptCommand& cmd, Stream& s) {
         }
         break;
     }
-    case CutsceneOp::AnimStart:
-    case CutsceneOp::AnimEnd:
     case CutsceneOp::LightStart: {
         // `DynamicLights::create` at the entity position (Characters-2's map).
         Light l;
@@ -280,7 +326,6 @@ void CutscenePlayer::fire(const ScriptCommand& cmd, Stream& s) {
     case CutsceneOp::LightEnd:
     case CutsceneOp::SpriteStart:
     case CutsceneOp::SpriteEnd:
-    case CutsceneOp::SoundEnd:
     case CutsceneOp::SubScriptStart:
     case CutsceneOp::SubScriptEnd:
     case CutsceneOp::StreamEnd:
@@ -304,6 +349,7 @@ void CutscenePlayer::tick(float frames) {
                 s.next = word;
                 if (s.time > word) {
                     s.done = true;  // no loop-back in the travelled data; hold the last frame
+                    cue_sound(s, SoundAction::End);
                 }
                 break;
             }
@@ -311,8 +357,7 @@ void CutscenePlayer::tick(float frames) {
                 s.next = cmd.time;
                 break;
             }
-            if (cmd.op == 5) {  // Wait moves `next`
-                s.next = float(cmd.payload[0] | (cmd.payload[1] << 8));
+            if (cmd.op == 5) {  // decode_stream already assigned absolute times to the commands.
                 ++s.cursor;
                 continue;
             }
@@ -321,7 +366,10 @@ void CutscenePlayer::tick(float frames) {
         }
         if (!s.done) interpolate(s);
     }
-    if (time_ >= end_time_ + 60) stop();  // hold one extra second, then release the camera
+    for (Stream& s : streams_) {
+        if (!s.done && s.sound_source >= 0) cue_sound(s, SoundAction::Move);
+    }
+    if (time_ >= end_time_ && (locks_player_ || locks_drones_ || time_ >= end_time_ + 60)) stop();
 }
 
 std::optional<CutscenePlayer::Camera> CutscenePlayer::camera() const {
@@ -356,27 +404,34 @@ std::vector<CutscenePlayer::EntityPose> CutscenePlayer::entities() const {
     return out;
 }
 
+std::vector<CutscenePlayer::ActorPose> CutscenePlayer::actors() const {
+    std::vector<ActorPose> out;
+    if (!playing_) return out;
+    for (const Stream& s : streams_) {
+        if (!s.actor.skin || s.done) continue;
+        ActorPose pose = s.actor;
+        pose.frame = std::max(1.0f, pose.frame + s.time - s.entity_start);
+        out.push_back(pose);
+    }
+    return out;
+}
+
+std::optional<CutscenePlayer::PlayerHandoff> CutscenePlayer::take_handoff() {
+    if (playing_) return std::nullopt;
+    auto out = handoff_;
+    handoff_.reset();
+    return out;
+}
+
 std::vector<CutscenePlayer::Sound> CutscenePlayer::take_sounds() {
     std::vector<Sound> out;
     out.swap(sounds_);
     return out;
 }
 
-std::vector<CutscenePlayer::Message> CutscenePlayer::take_messages() {
-    std::vector<Message> out;
-    out.swap(messages_);
-    return out;
-}
-
 std::vector<CutscenePlayer::Light> CutscenePlayer::take_lights() {
     std::vector<Light> out;
     out.swap(lights_);
-    return out;
-}
-
-std::vector<CutscenePlayer::Music> CutscenePlayer::take_music() {
-    std::vector<Music> out;
-    out.swap(music_);
     return out;
 }
 

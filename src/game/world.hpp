@@ -28,6 +28,7 @@ struct SpawnPoint {
     // Marker parameter 3 (Player_Init's switch, single player only): 1 starts swimming (substate 3), 2 zero-G
     // (substate 8), 3 crouched (substate 4); anything else walks.
     std::uint32_t start_type = 0;
+    std::uint16_t entry_channel = 0;
 };
 // Single-player markers first, then multiplayer ones, each in map order.
 std::vector<SpawnPoint> find_spawn_points(const Level& level);

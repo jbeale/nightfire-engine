@@ -72,6 +72,7 @@ public:
         instance_.tick();
         return instance_.root_motion();
     }
+    const CharacterInstance* character() const override { return &instance_; }
     std::optional<Vec3> frame_translation(std::uint32_t sequence, int frame) const override {
         const AnimSeq* seq = bank_.sequence(sequence);
         const Skeleton* skeleton = seq ? bank_.skeleton(seq->skeleton) : nullptr;

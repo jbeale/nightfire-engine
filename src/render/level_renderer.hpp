@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <filesystem>
 #include <map>
 #include <optional>
 #include <unordered_set>
@@ -107,6 +108,7 @@ private:
     void set_fog(bool on);
 
     Level& level_;
+    std::filesystem::path texture_override_dir_;
     GLuint program_ = 0;
     GLint u_mvp_ = -1, u_atest_ = -1, u_aref_ = -1, u_fog_color_ = -1, u_fog_start_ = -1;
     GpuTexture white_;

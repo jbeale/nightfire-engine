@@ -1,10 +1,21 @@
 #include <cmath>
 
 #include "game/sp_idle.hpp"
+#include "game/weapons.hpp"
 
 namespace nf::sp {
 
 using namespace nf::drone;
+
+bool opponent_armed(const Drone& d) {
+    int weapon = 0;
+    if (d.opponent.kind == TargetRef::Kind::Player) {
+        if (const auto* weapons = d.sys->weapons()) weapon = weapons->current_weapon(d.opponent.index);
+    } else if (d.opponent.kind == TargetRef::Kind::Drone) {
+        if (const auto* target = d.sys->find(d.opponent.index)) weapon = target->weapon;
+    }
+    return (weapon > 1 && weapon < 0x48 && weapon != 0x47) || (weapon >= 0x6a && weapon < 0x72);
+}
 
 bool stand_idle_anim(Drone& d, bool timed) {
     // DroneAnim_SetStandIdleAnim 0x13cad0
@@ -58,18 +69,6 @@ int update_patrol_route(Drone& d) {
 }
 
 void patrol_talk(Drone& d) {
-    // NDrone2_PatrolTalk 0x1?: guards of class 3 mutter now and then (rate limited by NPCGlobals+0x1b4)
-    if (d.health <= 0 || d.sys->config().multiplayer) return;
-    IdleSlot& s = sx(d).slot<IdleSlot>();
-    (void)s;
-    if (d.char_class != 3) return;
-    static thread_local std::uint32_t next_talk = 0;   // NPCGlobals+0x1b4: one voice line per 10 s over all drones
-    if (d.now() < next_talk) return;
-    if (d.sys->rand_int(2) != 0) {
-        next_talk = d.now() + d.seconds(5.0f);
-        return;
-    }
-    next_talk = d.now() + d.seconds(10.0f);
     talk(d, Speech::Patrol);
 }
 

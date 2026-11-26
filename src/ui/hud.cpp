@@ -1525,7 +1525,9 @@ struct Hud::Impl {
                 const Spr& s = p.sprites[k];
                 if (s.s.layer == kHidden) continue;
                 const bool flash = pane_index == std::size_t(HudPane::Health) && k >= first_flash && k < first_flash + 4;
-                items.push_back({&s, flash ? 0.0f : offset_x, 0, flash});
+                const bool tint = pane_index == std::size_t(HudPane::RcCar) && k == 0;
+                const bool widen = flash || tint;
+                items.push_back({&s, widen ? 0.0f : offset_x, 0, widen});
             }
             for (const Spr& s : p.extra)
                 if (s.s.layer != kHidden) items.push_back({&s, offset_x, 0});

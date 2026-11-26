@@ -283,7 +283,7 @@ Vec3 muzzle_position(const Drone& d) {
         const Mat4 m = d.character->datum_world(d.look.hand_datum);
         const float s = std::sin(d.yaw), c = std::cos(d.yaw);
         const Vec3 o{m[12], m[13], m[14]};
-        return d.feet() + Vec3{o[0] * c + o[2] * s, o[1], -o[0] * s + o[2] * c};
+        return d.pos + Vec3{o[0] * c + o[2] * s, o[1], -o[0] * s + o[2] * c};
     }
     const Vec3 torso = drone_bone_pos(d, 2);
     const Vec3 fwd = d.forward();

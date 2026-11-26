@@ -32,6 +32,7 @@ constexpr std::uint32_t kNisList = 0x1000003E;      // NIS sequence list (C_NIS)
 // The list takes the cursor on show (the page has no buttons to land on).
 bool Frontend::Impl::p_end_mission(ui::Control&, const ui::Msg& m) {
     if (m.type == kPageShown) {
+        send(0x10000184, kLabelSpriteFlags, 0x100);  // P_ENDMISSION shares the pause silhouette
         mgr->send_manager(kSelectControl, kEndChoice);
     } else if (m.type == kAccept) {
         const int choice = mgr->send(kEndChoice, kGetValue);

@@ -49,13 +49,10 @@ struct SkinnedMesh {
     // vertex owns `morph_targets` consecutive position deltas, one per target.
     std::uint32_t morph_targets = 0;
     std::vector<std::array<float, 3>> morph_deltas;
-    // Box 0 flags +0x34 bit 0, like GfxMesh::envmap: the skin VU variant builds ST from the camera axes
-    // (FillMatrixChainSkin always uploads them). Set by CharacterBank from the model's box.
-    bool envmap = false;
     std::size_t triangles() const;
 };
 
-// Box 0 flags +0x34 bit 0 of a map-chunk model: environment-mapped (FillMatrixChainRot / the skin VU variant).
+// Box 0 flags +0x34 bit 0 of a map-chunk model: environment-map flag read by FillMatrixChainRot.
 bool model_envmapped(const Model& model);
 
 // The (at most eight) strongest facial weights, ascending by target index (AnimObjectDraw -> Morph_Index /
@@ -202,6 +199,7 @@ public:
     const std::map<std::uint32_t, SkinDef>& skins() const { return skins_; }
     const std::map<std::uint32_t, AnimSeq>& sequences() const { return seqs_; }
     const std::map<std::uint32_t, AnimScript>& scripts() const { return scripts_; }
+    const std::map<std::uint32_t, Bytes>& cutscenes() const { return cutscenes_; }
     const std::vector<LightZone>& light_zones() const { return zones_; }
     // The room cel containing `pos` (build_FindCel): candidates are the zones whose box contains it (original
     // order, at most 64); one candidate wins directly, otherwise each candidate's geometry is ray-tested
@@ -247,6 +245,7 @@ private:
     std::map<std::uint32_t, SkinDef> skins_;
     std::map<std::uint32_t, AnimSeq> seqs_;
     std::map<std::uint32_t, AnimScript> scripts_;
+    std::map<std::uint32_t, Bytes> cutscenes_;
     std::vector<MapLight> lights_;
     std::vector<LightZone> zones_;
     std::unordered_map<std::uint32_t, ModelRef> by_hash_;

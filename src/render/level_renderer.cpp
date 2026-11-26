@@ -1,7 +1,12 @@
 #include "render/level_renderer.hpp"
 
+#include <SDL3/SDL.h>
+
 #include <algorithm>
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
+#include <memory>
 
 #include "assets/collision.hpp"
 
@@ -10,6 +15,43 @@ namespace nf {
 using namespace gl;
 
 namespace {
+
+// Override files use the map chunk hash and its local texture index, e.g. 010000fa-43.png.
+std::vector<std::uint8_t> load_texture_override(const std::filesystem::path& dir, std::uint32_t chunk_hash,
+                                                std::int32_t index, const Texture& stock) {
+    if (dir.empty() || stock.frames != 1) return {};
+    char filename[32];
+    std::snprintf(filename, sizeof(filename), "%08x-%d.png", chunk_hash, index);
+    const auto path = dir / filename;
+    std::error_code error;
+    if (!std::filesystem::exists(path, error)) {
+        if (error) SDL_Log("Texture override %s: %s", path.string().c_str(), error.message().c_str());
+        return {};
+    }
+
+    using Surface = std::unique_ptr<SDL_Surface, decltype(&SDL_DestroySurface)>;
+    Surface png(SDL_LoadPNG(path.string().c_str()), SDL_DestroySurface);
+    if (!png) {
+        SDL_Log("Texture override %s: %s", path.string().c_str(), SDL_GetError());
+        return {};
+    }
+    if (png->w != int(stock.width * 2) || png->h != int(stock.height * 2)) {
+        SDL_Log("Texture override %s: expected %ux%u", path.string().c_str(), stock.width * 2, stock.height * 2);
+        return {};
+    }
+    Surface rgba(SDL_ConvertSurface(png.get(), SDL_PIXELFORMAT_RGBA32), SDL_DestroySurface);
+    // PNGs are top-row-first. The map renderer uploads the bottom row first.
+    if (!rgba || !SDL_FlipSurface(rgba.get(), SDL_FLIP_VERTICAL)) {
+        SDL_Log("Texture override %s: %s", path.string().c_str(), SDL_GetError());
+        return {};
+    }
+    const std::size_t row_bytes = std::size_t(rgba->w) * 4;
+    std::vector<std::uint8_t> pixels(row_bytes * rgba->h);
+    for (int y = 0; y < rgba->h; ++y)
+        SDL_memcpy(pixels.data() + y * row_bytes, static_cast<const std::uint8_t*>(rgba->pixels) + y * rgba->pitch, row_bytes);
+    SDL_Log("Texture override loaded: %s (%dx%d)", path.string().c_str(), rgba->w, rgba->h);
+    return pixels;
+}
 
 // Vertex colour: the GS modulates (TFX = MODULATE, TCC = 1) as Cs = Ct * Cf >> 7 with 0x80 = 1.0 per
 // channel, and the VIF colour stream reaches it unscaled (the EE draw path uploads matrices and DMA
@@ -161,6 +203,7 @@ Mat4 Camera::view() const {
 }
 
 LevelRenderer::LevelRenderer(Level& level, const RenderOptions& initial) : options(initial), level_(level) {
+    if (const char* dir = std::getenv("NIGHTFIRE_TEXTURE_OVERRIDES"); dir && *dir) texture_override_dir_ = dir;
     program_ = compile_program(kVertexShader, kFragmentShader);
     u_mvp_ = glGetUniformLocation(program_, "u_mvp");
     u_atest_ = glGetUniformLocation(program_, "u_atest");
@@ -375,19 +418,23 @@ void LevelRenderer::draw_objects(const Camera& cam, float aspect, const std::vec
 }
 
 const LevelRenderer::GpuTexture* LevelRenderer::texture(std::size_t chunk, std::int32_t index) {
-    const auto& textures = level_.chunks()[chunk].chunk.textures;
+    const auto& file = level_.chunks()[chunk];
+    const auto& textures = file.chunk.textures;
     if (index < 0 || std::size_t(index) >= textures.size()) return &white_;
     auto key = std::pair{chunk, index};
     if (auto it = textures_.find(key); it != textures_.end()) return &it->second;
     const Texture& t = textures[std::size_t(index)];
+    const auto replacement = load_texture_override(texture_override_dir_, file.entry.hash, index, t);
+    const auto scale = replacement.empty() ? 1u : 2u;
     GpuTexture& out = textures_[key];
     out.frame_ticks = t.frame_ticks;
     out.frames.resize(t.frames);
     glGenTextures(GLsizei(t.frames), out.frames.data());
     for (std::uint32_t f = 0; f < t.frames; ++f) {
         glBindTexture(GL_TEXTURE_2D, out.frames[f]);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, GLsizei(t.width), GLsizei(t.height), 0, GL_RGBA, GL_UNSIGNED_BYTE,
-                     t.frame_pixels(f));
+        const void* pixels = replacement.empty() ? static_cast<const void*>(t.frame_pixels(f)) : replacement.data();
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, GLsizei(t.width * scale), GLsizei(t.height * scale), 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, pixels);
         if (options.mipmaps) glGenerateMipmap(GL_TEXTURE_2D);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, options.mipmaps ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);

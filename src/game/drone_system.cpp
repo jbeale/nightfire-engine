@@ -49,7 +49,7 @@ struct DroneSystem::Target final : DamageTarget {
     }
     bool alive() const override {
         const Drone* d = sys->find(drone_id);
-        return d && d->alive();
+        return d && d->alive() && !d->hidden && !d->ghost;
     }
     void hurt(const HitInfo& hit) override {
         DroneHit h;
@@ -424,7 +424,18 @@ void DroneSystem::tick(World&, FrameTiming timing) {
             --delivery_depth_;
             if (d->smi.pending) run_transition(*d);
         }
-        if (d->hidden) continue;   // NDrone2_Enable(false): no control
+        if (d->hidden) {
+            // A channel-gated drone remains invisible but still receives its local switch poll.
+            // Broadcasts and external messages to WaitSwitch are still suppressed by post().
+            if (d->smi.cur == kStateWaitSwitch) {
+                Msg m;
+                m.id = kMsgTick;
+                m.sender = m.dest = d->id;
+                m.sent = m.deliver_at = now();
+                deliver(*d, m);
+            }
+            continue;
+        }
         pre_drone_control(*d);     // timers -> msgs 4/0xc/0xd
         control_standard(*d);      // Drone_Control -> NDrone2_ControlSTANDARD
     }

@@ -120,6 +120,7 @@ struct SurfaceEffect {
     std::uint32_t puff_gfx[2] = {};   // +8, +12 smoke / dust sprites
     std::uint32_t spark_gfx = 0;      // +16 sparks
     std::uint16_t impact_sound = 0;   // +20 SFX id (SFX_IMPACT_*)
+    std::uint16_t footstep_sound = 0; // +22 SFX id (Effect_Player)
     std::uint16_t ricochet_sound = 0; // +24 SFX id
     std::uint8_t ricochet_prob = 0;   // +26 Effect_RicochetProb: Rand(prob) test
     float restitution = 0;            // +28 speed kept by a bouncing projectile
