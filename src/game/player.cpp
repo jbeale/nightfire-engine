@@ -367,7 +367,12 @@ void Player::update(const ActionInput& input, const PlayerSettings& settings, co
     yaw += yaw_step_;
 
     // Pitch recentring while walking (Player_Update, after Player_MonitorAir).
-    if (look_state_ >= 2 && look_state_ < 4) {
+    const int sub = int(substate);
+    const bool can_aim = (sub < 8 || sub > 12) && sub != 16;
+    const MouseLook mouse = input.mouse_look();
+    const bool mouse_aiming = mouse.moved() && can_aim && !input_frozen_ && !movement_frozen &&
+                              !matrix_driven() && !rope_camera();
+    if (!mouse_aiming && look_state_ >= 2 && look_state_ < 4) {
         const float step = (pitch_target_ - pitch) * 0.075f;
         if (substate != SubState::Walk || jump_state == 0) {
             pitch = std::clamp(pitch + step, -1.0f, 1.0f);
@@ -375,8 +380,14 @@ void Player::update(const ActionInput& input, const PlayerSettings& settings, co
         }
     }
     // Player_Aiming returns at once for substates 8..12 and 16 (flying, riding, driven).
-    const int sub = int(substate);
-    if ((sub < 8 || sub > 12) && sub != 16) aim(input, timing);
+    if (can_aim) aim(input, timing);
+    if (mouse_aiming) {
+        const float look_zoom = (body_flags & body::kZoomed) != 0 ? zoom : 1.0f;
+        yaw += mouse.yaw / look_zoom;
+        pitch += mouse.pitch / (kHalfPi * look_zoom);
+        aim_state_.cursor_x = aim_state_.cursor_y = 0.0f;
+        look_state_ = 1;
+    }
     pitch = std::clamp(pitch, -1.0f, 1.0f);   // Player_ViewClamping
 
     // The animation keeps the feet planted: obj+0x30 follows drops in collbody+0xCC vertically
@@ -465,6 +476,7 @@ void Player::resolve_collisions(const CollisionWorld& world) {
     q.radius = capsule_radius;
     q.pick = capsule_pick_;
     q.ignore = capsule_ignore_;
+    q.tracked_room = water.room;
     last_cylinder_ = world.cylinder(q);
     ObjectContacts contacts;
     if (object_world_) object_world_->collide(q, last_cylinder_, contacts);

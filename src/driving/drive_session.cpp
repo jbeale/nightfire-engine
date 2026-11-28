@@ -130,7 +130,7 @@ DriveSession::DriveSession(DrivingLevel& level, const std::string& car)
     const CarpFile carp(model);
     const ElfImage elf = carp.load_elf();
     car_shapes_ = parse_ssh(level.read_file("data\\car\\model\\" + stem + ".ssh"));
-    auto parts = build_vehicle_parts(carp, elf);
+    auto parts = build_vehicle_parts(carp, elf, stem == "supersnow");
     Vec3 lo{}, hi{};
     const bool vanquish = stem.rfind("vanquish", 0) == 0 && stem != "vanquishsub";
     int wheel_count = 0;
@@ -150,6 +150,19 @@ DriveSession::DriveSession(DrivingLevel& level, const std::string& car)
                 if (p.id == id) body_.batches.insert(body_.batches.end(), p.mesh.batches.begin(), p.mesh.batches.end());
     Vec3 half{};
     for (int a = 0; a < 3; ++a) body_center_[a] = (lo[a] + hi[a]) / 2, half[a] = (hi[a] - lo[a]) / 2;
+    if (kind_ == PlayerKind::Sled && stem == "supersnow") {
+        const auto gun = std::ranges::find(parts, 0x0c, &VehiclePart::id);
+        if (gun != parts.end()) mounted_gun_ = gun->mesh;
+        const auto mount = std::ranges::find(parts, 0x0f, &VehiclePart::id);
+        if (mount != parts.end()) gun_mount_ = mount->mesh;
+        constexpr int gun_parts[] = {0x0c, 0x0d, 0x0f};
+        SceneMesh assembled = build_bound_vehicle_body(carp, parts, 0x11);
+        gunner_body_ = build_bound_vehicle_body(carp, parts, 0x11, gun_parts);
+        if (!assembled.batches.empty()) {
+            body_ = std::move(assembled);
+            body_center_ = {0, Snowmobile::kRideHeight, 0};
+        }
+    }
 
     const PhysicsGlobals globals = PhysicsGlobals::load(
         Attributes::parse_flat(level.read_text("data\\tuning\\physics\\rigid\\default.tun")),

@@ -46,11 +46,11 @@ Drone* hostage_killer_of(Drone& d);
 void release_waiting(Drone& d);
 
 // Cover-node queries shared by the cover states and the combat selector (docs/spec-arena-ai.md Part 3 §7).
-// Drone_IsCoverNodeUsable: switch gates pass and no live SP drone has claimed the node.
+// Switch gates and occupancy of a cover node. Selection also checks angle and reachability.
 bool cover_usable(Drone& d, std::size_t index);
 // NDrone2_CoverAvailable: a usable node exists (no claim made; RunForCover claims with find_cover).
 bool cover_available(Drone& d);
-// NDrone2_FindCover 0x152548: nearest usable node in 2-D, claimed on success (Drone+0x4f8 & 0x1000).
+// NDrone2_FindCover 0x152548: closest reachable cover, claimed on success.
 bool find_cover(Drone& d);
 // Release a claimed node (Drone_Delete / UnderCoverLeave path).
 void release_cover(Drone& d);

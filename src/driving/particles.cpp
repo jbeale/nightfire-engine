@@ -59,6 +59,40 @@ void ParticleSystem::spawn(const Vec3& pos, const Vec3& vel, float life, float s
     particles_.push_back(p);
 }
 
+void ParticleSystem::burst_explosion(const Vec3& centre, float scale) {
+    const std::uint64_t count = scale > 2.0f ? 34 : 14;
+    for (std::uint64_t i = 0; i < count; ++i) {
+        const Vec3 spread{wobble(ticks_, 67 + i), wobble(ticks_, 103 + i), wobble(ticks_, 147 + i)};
+        const Vec3 offset = spread * scale;
+        const float lift = 1.5f + 0.6f * scale;
+        const float variation = 0.78f + 0.53f * std::abs(spread[1]);
+        spawn(centre + offset, offset * 2.7f + Vec3{0, lift, 0},
+              (0.51f + 0.06f * scale) * variation, 0.85f * scale, 2.5f * scale,
+              {1.0f, 0.47f + 0.23f * variation, 0.13f}, 0.97f, 2.5f);
+        spawn(centre + offset * 0.85f, offset * 0.55f + Vec3{0, lift, 0},
+              (1.75f + 0.51f * scale) * variation, 0.60f * scale, 1.25f * scale,
+              {0.24f, 0.225f, 0.22f}, 0.65f, -0.3f);
+        spawn(centre + offset * 0.45f, spread * (3.5f + 2.6f * scale) + Vec3{0, lift * 1.5f, 0},
+              0.95f * variation, 0.06f + 0.045f * scale, -0.06f,
+              {1.0f, 0.72f, 0.23f}, 1.0f, 11.0f);
+    }
+}
+
+void ParticleSystem::burst_chalet_debris(const Vec3& center, const Vec3& direction, bool glass) {
+    const Vec3 lateral = cross(Vec3{0, 1, 0}, direction);
+    const Vec3 colour = glass ? Vec3{0.60f, 0.83f, 1.0f} : Vec3{0.58f, 0.31f, 0.14f};
+    for (std::uint64_t i = 0; i < (glass ? 65u : 26u); ++i) {
+        const float across = wobble(ticks_, 100 + i);
+        const float up = wobble(ticks_, 170 + i);
+        const float scatter = wobble(ticks_, 237 + i);
+        const Vec3 origin = center + lateral * (across * 1.30f) + Vec3{0, up * 0.92f, 0};
+        const Vec3 velocity = direction * (5.0f + scatter * 4.0f) +
+            lateral * (across * 4.8f) + Vec3{0, 2.7f + up * 2.0f, 0};
+        spawn(origin, velocity, 0.45f + std::abs(scatter) * 0.85f,
+              glass ? 0.072f : 0.12f, 0, colour, 0.94f, 10.0f);
+    }
+}
+
 void ParticleSystem::tick(const DriveSession& session, const Mission& mission) {
     ++ticks_;
     tick_vehicle(session, mission, kDt);

@@ -874,6 +874,14 @@ void WeaponSystem::weapon_firing(int slot, PlayerWeapons& p, World& world, Frame
     if (p.current == kNoWeapon) return;
 
     const int need = d.rounds_per_shot;
+    // The command detonates the projectile already in flight, including the last round.
+    if (pressed) {
+        if (const Projectile* g = guided_projectile(slot)) {
+            detonate_owned(slot, g->weapon);
+            p.cooldown = 30.0f;
+            return;
+        }
+    }
     auto try_reload = [&](bool edge) {
         if (p.anim_state != WeaponAnim::Idle) return false;
         if (edge && p.aim && d.has(wf1::kScope)) return false;
@@ -894,13 +902,6 @@ void WeaponSystem::weapon_firing(int slot, PlayerWeapons& p, World& world, Frame
     }
 
     if (pressed && gate && p.cooldown <= 0.0f) {
-        // Guided missile in flight (F2 & 0x4, owner in substate 10): the trigger blows it up in the air
-        // (Bullet_handle_object_destruction) instead of firing a new one.
-        if (Projectile* g = find_guided(slot)) {
-            detonate_owned(slot, g->weapon);
-            p.cooldown = 30.0f;
-            return;
-        }
         p.cooldown = 1.0f;
         p.shots_left = d.fire_count[std::size_t(std::min<int>(p.weapon[std::size_t(p.current)].mode_index, 3))];
         p.cycle_start = p.shots_left;
@@ -1036,7 +1037,9 @@ void WeaponSystem::init_bullet(int slot, PlayerWeapons& p, World& world) {
     const Player* pl = world.player(slot);
     if (!pl) return;
     const Vec3 head = pl->eye();
-    const Vec3 fwd = aim_direction(slot, world);
+    // The watch follows the reticle when cutting small targets and ignores combat auto-aim.
+    const bool cutting_beam = (d.flags2 & wf2::kLaserBeam) != 0;
+    const Vec3 fwd = cutting_beam ? view_forward(pl->yaw, pl->view_pitch()) : aim_direction(slot, world);
     const float reach = 1000.0f;
     Vec3 origin = head;
     // Launcher midpoint (Player_WeaponInitBullet): haveModel starts as def+220 != 0 and is cleared for base
@@ -1045,7 +1048,7 @@ void WeaponSystem::init_bullet(int slot, PlayerWeapons& p, World& world) {
     const bool launcher = d.model_gfx != 0 && d.has(wf1::kLauncherOrigin) && !(p.aim && d.has(wf1::kScope)) &&
                           d.base != 1 && d.base != 82 && d.base != 84 && d.base != 88 && d.base != 89 &&
                           d.base != 91;
-    if (launcher) {   // midpoint of the head and the gun bone: about half a metre ahead and below the eye
+    if (launcher && !cutting_beam) {   // midpoint of the head and the gun bone
         const Vec3 left = {std::cos(pl->yaw), 0.0f, -std::sin(pl->yaw)};
         origin = head + fwd * 0.5f + left * -0.1f + Vec3{0, -0.15f, 0};
     }
@@ -1070,6 +1073,8 @@ void WeaponSystem::init_bullet(int slot, PlayerWeapons& p, World& world) {
     s.owner_aiming = p.aim;
     s.shots_in_burst = std::max(0, p.cycle_start - p.shots_left);   // fired_in_cycle; spawn clamps by clipSize
     fire(s, d.id);
+    if (!cutting_beam && (d.flags3 & wf3::kGrapple) == 0 && d.base != 1)
+        events_.player_shots.push_back(slot);
     if (d.model_gfx != 0 && d.muzzle_script != 0) p.muzzle_frames = d.id == 51 ? 7 : 3;
     p.rumble = d.rumble;
 }

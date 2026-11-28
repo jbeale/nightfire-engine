@@ -8,6 +8,7 @@
 #include <string>
 
 #include "app/app.hpp"
+#include "driving/alpine_checkpoint.hpp"
 #include "render/window.hpp"
 #include "ui/renderer.hpp"
 #include "ui/text.hpp"
@@ -22,6 +23,7 @@ enum class DriveExit {
 struct DriveResult {
     DriveExit exit = DriveExit::QuitToMenu;
     bool won = false;
+    std::optional<driving::AlpineCheckpoint> checkpoint = std::nullopt;
 };
 
 struct DriveHeadless {
@@ -33,7 +35,8 @@ struct DriveHeadless {
 class DriveSessionApp {
 public:
     DriveSessionApp(AppContext& ctx, Window& window, ui::Renderer& ui, ui::TextRenderer& text,
-                    const std::string& level, const std::string& car, const AppConfig& cfg);
+                    const std::string& level, const std::string& car, const AppConfig& cfg, bool mute = false,
+                    std::optional<driving::AlpineCheckpoint> checkpoint = std::nullopt);
     ~DriveSessionApp();
 
     DriveSessionApp(const DriveSessionApp&) = delete;

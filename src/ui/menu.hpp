@@ -257,6 +257,7 @@ public:
     unsigned idle_frames() const;                      // Menu_GetNoInputCount
     int controller() const { return controller_; }
     std::uint32_t current_page_id() const;
+    bool has_page_history() const { return !history_.empty(); }
     Page* current_page() { return current_; }
     Page* find_page(std::uint32_t id);
     bool input_locked() const { return input_lock_; }

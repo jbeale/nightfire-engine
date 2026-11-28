@@ -991,12 +991,14 @@ int run_server_impl(int argc, char** argv, const std::atomic<bool>* stop = nullp
                         pad.buttons = input.buttons;
                         pad.rx = input.sticks[0]; pad.ry = input.sticks[1];
                         pad.lx = input.sticks[2]; pad.ly = input.sticks[3];
+                        pad.mouse = input.mouse;
                         consumed_input[local] = true;
                     }
                 }
             }
-            nf::PadInputs pads{};
-            for (std::size_t i = 0; i < current_inputs.size(); ++i) pads[i] = current_inputs[i];
+            const nf::PadInputs pads = current_inputs;
+            // Missing samples can hold buttons and sticks. Each relative mouse delta applies only once.
+            for (auto& pad : current_inputs) pad.mouse = {};
             if (!session.arena().over()) session.tick(pads, frame_timing);
             if (test_give_on_kill_slot >= 0) {
                 for (const nf::ScoreRow& row : session.arena().scoreboard()) {

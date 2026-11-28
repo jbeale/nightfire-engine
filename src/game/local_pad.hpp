@@ -14,6 +14,13 @@
 
 namespace nf {
 
+inline MouseLook mouse_look_from_motion(float dx, float dy, float sensitivity = 1.0f) {
+    constexpr float radians_per_pixel = 0.00061086524f;  // 0.035 degrees at 100%
+    const float scale = -radians_per_pixel * sensitivity;
+    return {std::clamp(dx * scale, -MouseLook::kMaxDelta, MouseLook::kMaxDelta),
+            std::clamp(dy * scale, -MouseLook::kMaxDelta, MouseLook::kMaxDelta)};
+}
+
 // One local player's controller: an optional keyboard + mouse (nfgame's keyboard layout, docs/gameplay.md "nfgame")
 // and an optional gamepad read positionally as a DualShock 2. Buttons come from the shared binding table
 // (InputContext::OnFoot, rebindable in nightfire.cfg); sticks come out in game form (post dead zone).
@@ -30,7 +37,11 @@ public:
             wheel_ = e.wheel.y > 0 ? 1 : e.wheel.y < 0 ? -1 : 0;
         }
     }
-    void set_captured(bool c) { captured_ = c; }
+    void set_captured(bool c) {
+        captured_ = c;
+        if (!c) mouse_dx_ = mouse_dy_ = 0;
+    }
+    void set_mouse_sensitivity(int percent) { mouse_scale_ = std::clamp(percent, 50, 400) / 100.0f; }
     bool has_gamepad() const { return pad_ != nullptr; }
     // The devices of this player (for the prompt glyphs, InputDevices::assign).
     SlotDevice device() const { return {keyboard_, pad_ ? SDL_GetGamepadID(pad_) : 0}; }
@@ -43,7 +54,7 @@ public:
         return s;
     }
 
-    PadState sample() {
+    PadState sample(bool invert_mouse_y = false) {
         PadState raw;
         const InputBindings& bindings = input_bindings();
         if (keyboard_) {
@@ -62,20 +73,12 @@ public:
             raw.buttons |= bindings.gamepad_buttons(InputContext::OnFoot, pad_);
         }
         PadState out = compensate_sticks(raw);
-        if (keyboard_ && (mouse_dx_ != 0 || mouse_dy_ != 0)) {
-            out.lx = stick_from_delta(mouse_dx_, out.lx);
-            out.ry = stick_from_delta(mouse_dy_, out.ry);
-        }
+        out.mouse = mouse_look_from_motion(mouse_dx_, invert_mouse_y ? -mouse_dy_ : mouse_dy_, mouse_scale_);
         mouse_dx_ = mouse_dy_ = 0;
         return out;
     }
 
 private:
-    static std::uint8_t stick_from_delta(float delta, std::uint8_t current) {
-        constexpr float kUnitsPerPixel = 4.0f;
-        return std::uint8_t(std::clamp(int(std::lround(float(current) + delta * kUnitsPerPixel)), 0, 255));
-    }
-
     // Positional, as the DualShock 2 report: the left stick is lx/ly, the right stick rx/ry (the controller style
     // decides what they do; Classic Bond: left = move/turn, right = strafe/look).
     void apply_gamepad_sticks(PadState& raw) {
@@ -95,6 +98,7 @@ private:
     bool keyboard_;
     SDL_Gamepad* pad_;
     bool captured_ = false;
+    float mouse_scale_ = 1.0f;
     float mouse_dx_ = 0, mouse_dy_ = 0;
     int wheel_ = 0;
 };

@@ -31,6 +31,7 @@ struct Glyph {
 
 struct Font {
     std::uint32_t texture_hash = 0;
+    unsigned raster_scale = 1;  // atlas texels per original layout unit
     std::uint16_t first_char = 0, last_char = 0;
     float line_gap = 0, space_width = 0;
     std::vector<Glyph> glyphs;  // sorted by code

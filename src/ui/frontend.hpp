@@ -102,9 +102,10 @@ struct DossierInfo {
     std::uint32_t gadget_sprite = 0;
     std::uint32_t gadget_name = 0;
     std::uint32_t gadget_desc = 0;
-    std::vector<std::pair<std::string, std::string>> records;  // mission records rows
-    std::vector<std::pair<std::string, std::string>> rewards;  // reward rows
+    std::uint32_t mission_level = 0;  // initial mission in the records/rewards selector
 };
+
+constexpr std::uint32_t kCampaignMedalSprites[] = {0x0300019a, 0x0300013d, 0x03000140, 0x0300013e, 0x0300013f};
 
 // One P_MPDEBRIEFING 0x33 table row (MP_SortOutWhoWon order, best first): what only the match knows.
 // The handler fills the per-row labels (name 0x156, portrait 0x157, short name 0x158, numbers
@@ -175,6 +176,7 @@ public:
     void set_dossier(DossierInfo info);
     PlayerOptions& player_options();
     void set_mission_results(MissionResults results);
+    void set_mission_difficulty(int difficulty);
     void set_debriefing(DebriefInfo info);
     GameOptions& game_options();
     const std::string& profile_name() const;

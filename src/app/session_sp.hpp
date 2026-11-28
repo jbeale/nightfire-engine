@@ -7,14 +7,18 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include "app/app.hpp"
 #include "game/mission.hpp"
+#include "game/plr_stats.hpp"
 #include "render/window.hpp"
 #include "ui/frontend.hpp"
 #include "ui/hud.hpp"
 #include "ui/renderer.hpp"
 #include "ui/text.hpp"
+
+namespace nf::audio { class AudioSystem; }
 
 namespace nf::app {
 
@@ -26,12 +30,19 @@ struct SpLaunch {
     int give = -1;  // debug equip (nightfire --give ID): give + select at start (< 0 = loadout only)
     MissionSystem::Inventory inventory{};
     std::uint16_t entry_channel = 0;
+    std::uint32_t bond_count = 0;
+    std::string checkpoint{};
+    PlrStats stats{};
+    std::uint64_t play_frames = 0;
 };
+
+std::optional<SpLaunch> checkpoint_launch(std::string_view key, int difficulty);
 
 enum class SpExit {
     QuitToMenu,   // pause quit, P_ENDMISSION quit, or window close
     Restart,      // pause restart or P_ENDMISSION retry
-    NextMission,  // mission succeeded: `next_level` names the follow-up (0 = back to the frontend)
+    NextMission,  // another map within this mission
+    MissionSelect,
 };
 
 struct SpResult {
@@ -41,6 +52,10 @@ struct SpResult {
     std::uint32_t next_level = 0;  // sp_level id after a win (0x070000xx ACTION, 0x0900000x driving, 0 = frontend)
     MissionSystem::Inventory inventory{};
     std::uint16_t entry_channel = 0;
+    std::uint32_t bond_count = 0;
+    std::string checkpoint{};
+    PlrStats stats{};
+    std::uint64_t play_frames = 0;
 };
 
 struct SpHeadless {
@@ -52,7 +67,7 @@ struct SpHeadless {
 class SpSession {
 public:
     SpSession(AppContext& ctx, Window& window, ui::Renderer& ui, ui::TextRenderer& text, const SpLaunch& launch,
-              AppConfig& cfg);   // the pause menu writes the controller style / Y-inversion back
+              AppConfig& cfg, audio::AudioSystem* menu_audio = nullptr);
     ~SpSession();
 
     SpSession(const SpSession&) = delete;

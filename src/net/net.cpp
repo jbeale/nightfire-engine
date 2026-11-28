@@ -48,6 +48,7 @@ void close_socket(NativeSocket socket) {
 }
 constexpr std::uint32_t kMagic = 0x544e464e;  // "NFNT" on the wire
 constexpr std::size_t kHeaderBytes = 20;
+constexpr std::size_t kPadInputBytes = 23;
 constexpr std::size_t kMaxNameBytes = 32;
 constexpr std::size_t kMaxServerNameBytes = 64;
 constexpr std::size_t kMaxMapNameBytes = 64;
@@ -345,22 +346,28 @@ bool decode_server_info(std::span<const std::uint8_t> payload, ServerInfo& info)
 std::vector<std::uint8_t> encode_input(const PadInput& input) {
     if (input.local_player >= kMaxLocalPlayers) return {};
     std::vector<std::uint8_t> out;
-    out.reserve(15);
+    out.reserve(kPadInputBytes);
     put32(out, input.tick);
     put16(out, input.buttons);
     out.insert(out.end(), input.sticks.begin(), input.sticks.end());
     put32(out, input.view_tick);
     out.push_back(input.local_player);
+    put_float(out, input.mouse.yaw);
+    put_float(out, input.mouse.pitch);
     return out;
 }
 
 bool decode_input(std::span<const std::uint8_t> payload, PadInput& input) {
-    if (payload.size() != 15 || payload[14] >= kMaxLocalPlayers) return false;
+    if (payload.size() != kPadInputBytes || payload[14] >= kMaxLocalPlayers) return false;
+    const MouseLook mouse{get_float(payload.data() + 15), get_float(payload.data() + 19)};
+    const auto valid_delta = [](float delta) { return delta >= -MouseLook::kMaxDelta && delta <= MouseLook::kMaxDelta; };
+    if (!valid_delta(mouse.yaw) || !valid_delta(mouse.pitch)) return false;
     input.tick = get32(payload.data());
     input.buttons = get16(payload.data() + 4);
     std::copy_n(payload.begin() + 6, 4, input.sticks.begin());
     input.view_tick = get32(payload.data() + 10);
     input.local_player = payload[14];
+    input.mouse = mouse;
     return true;
 }
 
@@ -388,7 +395,7 @@ bool valid_input_batch_order(const InputBatch& batch) {
 std::vector<std::uint8_t> encode_input_batch(const InputBatch& batch) {
     if (!valid_input_batch_order(batch)) return {};
     std::vector<std::uint8_t> out;
-    out.reserve(1 + std::size_t(batch.count) * 15);
+    out.reserve(1 + std::size_t(batch.count) * kPadInputBytes);
     out.push_back(batch.count);
     for (std::size_t i = 0; i < batch.count; ++i) {
         const auto bytes = encode_input(batch.samples[i]);
@@ -399,12 +406,12 @@ std::vector<std::uint8_t> encode_input_batch(const InputBatch& batch) {
 
 bool decode_input_batch(std::span<const std::uint8_t> payload, InputBatch& batch) {
     if (payload.empty() || payload[0] == 0 || payload[0] > kMaxLocalPlayers * kInputRedundancy ||
-        payload.size() != 1 + std::size_t(payload[0]) * 15)
+        payload.size() != 1 + std::size_t(payload[0]) * kPadInputBytes)
         return false;
     InputBatch decoded;
     decoded.count = payload[0];
     for (std::size_t i = 0; i < decoded.count; ++i)
-        if (!decode_input(payload.subspan(1 + i * 15, 15), decoded.samples[i])) return false;
+        if (!decode_input(payload.subspan(1 + i * kPadInputBytes, kPadInputBytes), decoded.samples[i])) return false;
     if (!valid_input_batch_order(decoded)) return false;
     batch = decoded;
     return true;

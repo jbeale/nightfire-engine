@@ -10,6 +10,8 @@
 
 namespace nf {
 
+constexpr unsigned kFontBakeScale = 4;
+
 // The level bin that holds the front end: menu script (entry type 8), the menu backdrop map and the
 // shared UI chunk files (fonts, window skins, menu sprites). LoaderProcess hands its type-8 entry to
 // MenuManager_Load.

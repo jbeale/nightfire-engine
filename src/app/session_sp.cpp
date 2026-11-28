@@ -1,6 +1,7 @@
 // Single-player ACTION session: build, tick, draw, pause and end-mission.
 #include "app/session_sp.hpp"
 
+#include "app/menu_music.hpp"
 #include "app/movie.hpp"
 
 #include <SDL3/SDL.h>
@@ -15,6 +16,7 @@
 
 #include "assets/bin_archive.hpp"
 #include "assets/character.hpp"
+#include "assets/credit_data.hpp"
 #include "assets/cutscene.hpp"
 #include "assets/level.hpp"
 #include "assets/menu_validate.hpp"
@@ -41,12 +43,48 @@
 #include "render/level_renderer.hpp"
 #include "render/weather_renderer.hpp"
 #include "ui/prompts.hpp"
+#include "ui/menu_audio.hpp"
 
 namespace nf::app {
 
 namespace {
 
 constexpr float kTau = 6.2831853071795864769f;
+
+// Mission_Update sends these final maps to a pre-rendered outro before P_NFRESULTS.
+std::uint32_t mission_outro(std::uint32_t level) {
+    switch (level) {
+    case 0x07000004: case 0x07000008: case 0x0700000b: case 0x0700000d:
+    case 0x0700000f: case 0x07000013: case 0x0700001b:
+        return level + 0x00300000;
+    case 0x07000016:
+        return 0x07300017;
+    default:
+        return 0;
+    }
+}
+
+struct Checkpoint {
+    std::string_view key, name, bin;
+    std::optional<Vec3> position;
+    float yaw;
+    int give;
+    std::vector<std::pair<int, int>> channels;
+};
+
+const Checkpoint kExchangeCheckpoints[] = {
+    {"truck", "Truck approach", "07000005.bin", Vec3{54, 29.3f, 93.7f}, -1.57f, -1, {}},
+    {"library", "Library after Drake's speech", "07000007.bin", std::nullopt, 0, -1,
+        {{71, 1}, {72, 1}, {73, 1}, {21, 1}, {39, 1}, {169, 1}}},
+    {"safe", "Safe-room approach", "07000008.bin", Vec3{153.6f, 43.033f, -120.72f}, 1.57f, 78, {{137, 1}}},
+    {"gondola", "Gondola departure", "07000008.bin", Vec3{112, 27.8f, -125.8f}, 3.14f, 44, {{74, 1}}},
+};
+
+const Checkpoint* find_checkpoint(std::string_view key) {
+    for (const auto& checkpoint : kExchangeCheckpoints)
+        if (checkpoint.key == key) return &checkpoint;
+    return nullptr;
+}
 
 Camera interpolate_camera(const Vec3& previous_eye, float previous_yaw, float previous_pitch,
                           const Player& current, float alpha) {
@@ -63,9 +101,19 @@ PadState menu_pad(SDL_Gamepad* gamepad) { return input_bindings().sample(InputCo
 
 }  // namespace
 
+std::optional<SpLaunch> checkpoint_launch(std::string_view key, int difficulty) {
+    const auto* checkpoint = find_checkpoint(key);
+    if (!checkpoint) return std::nullopt;
+    SpLaunch launch{std::string(checkpoint->bin), difficulty, checkpoint->channels, checkpoint->give};
+    launch.checkpoint = key;
+    return launch;
+}
+
 struct SpSession::Impl {
-    Impl(AppContext& c, Window& w, ui::Renderer& u, ui::TextRenderer& t, const SpLaunch& l, AppConfig& cfg)
-        : ctx(c), window(w), ui(u), text(t), launch(l), config(cfg), timing(float(cfg.logic_hz)), user_config(cfg) {}
+    Impl(AppContext& c, Window& w, ui::Renderer& u, ui::TextRenderer& t, const SpLaunch& l, AppConfig& cfg,
+         audio::AudioSystem* menus)
+        : ctx(c), window(w), ui(u), text(t), launch(l), config(cfg), timing(float(cfg.logic_hz)), user_config(cfg),
+          menu_audio(menus) {}
 
     AppContext& ctx;
     Window& window;
@@ -75,6 +123,10 @@ struct SpSession::Impl {
     AppConfig config;
     FrameTiming timing;
     AppConfig& user_config;   // controller style / Y-inversion edited in the pause menu persist here
+    audio::AudioSystem* menu_audio;
+    const CutscenePlayer* skip_prompt_scene = nullptr;
+    float skip_prompt_time = 0;
+    bool previous_action = false, swallow_action = false;
 
     // Declared in dependency order (Level outlives World, bank outlives renderers).
     std::vector<std::uint8_t> bin_bytes;  // raw level .bin (cutscenes, menu script)
@@ -86,6 +138,8 @@ struct SpSession::Impl {
     drone::DroneSystem* drones = nullptr;
     sp::SpSystem* spsys = nullptr;
     MissionSystem* mission_sys = nullptr;  // owned by World (absent when the level has no MissionData entry)
+    std::uint32_t mission_base = 0;
+    std::uint64_t play_frames = 0;
     std::unique_ptr<NavNetwork> nav;
     SpriteLibrary fx_sprites;  // level chunk sprites for WeaponEffects (must outlive `effects`)
     std::unique_ptr<WeaponEffects> effects;
@@ -108,6 +162,7 @@ struct SpSession::Impl {
         std::int32_t tag = 0;
     };
     std::map<std::pair<std::size_t, std::uint16_t>, ScriptSound> script_sounds;
+    audio::SfxHandle watch_laser_sound = 0;
     std::int32_t next_script_sound_tag = 1;
     float step_distance = 0.0f;
     SDL_Gamepad* gamepad = nullptr;
@@ -117,10 +172,10 @@ struct SpSession::Impl {
     bool end_shown = false;
     bool mission_won = false;  // the state machine reported Succeeded before Done
     PlrStats plr_;              // mission counters feeding the results score
+    bool bond_pickup_popup = false;
     PlrScoreTables score_tables_;
     bool score_tables_ok_ = false;
     bool give_given = false, give_done = false;  // --give ID debug equip progress
-    int prev_muzzle_ = 0;              // muzzle_frames edge = one trigger pull
     std::uint64_t prev_deaths_ = 0;    // SpSystem::stats.deaths edge = kills
     std::uint64_t prev_mframes_ = 0;   // mission frames edge = elapsed time
     bool prev_use_ = false;            // Cross edge for pre_tick (held would flap switches)
@@ -206,6 +261,7 @@ struct SpSession::Impl {
                                  ex.what());
                 }
             }
+            mission_base = entry.base;
             mission_sys = mission.get();
             mission_sys->set_character_bank(bank.get());
             world->add_system(std::move(mission));
@@ -224,6 +280,16 @@ struct SpSession::Impl {
             for (const auto& [ch, val] : launch.channels) {
                 mission_sys->set_channel(std::uint16_t(ch), std::uint8_t(val));
                 std::printf("mission: debug preset channel %d = %d\n", ch, val);
+            }
+            if (const auto* checkpoint = find_checkpoint(launch.checkpoint)) {
+                if (checkpoint->position)
+                    world->player(0)->place_at_rest(*checkpoint->position, checkpoint->yaw, 0, 1);
+                if (checkpoint->key == "library") {
+                    mission_sys->finish_checkpoint_scene(*world, 0x06000073, timing);
+                    mission_sys->finish_checkpoint_scene(*world, 0x06000072, timing);
+                }
+                std::printf("mission checkpoint: %s at %.2f,%.2f,%.2f\n", launch.checkpoint.c_str(),
+                            world->player(0)->pos[0], world->player(0)->pos[1], world->player(0)->pos[2]);
             }
             if (launch.give >= 0)  // --give ID: applied in tick_world once the slot state exists
                 std::printf("mission: debug give weapon %d (armed, applies when idle)\n", launch.give);
@@ -275,8 +341,9 @@ struct SpSession::Impl {
         audio->set_sfx_volume(config.sfx_volume);
         audio->set_music_volume(config.music_volume);
         audio->set_subtitle_callback([this](const audio::SubtitleEvent& subtitle) {
-            hud->add_message(HudMessage{HudMsgType::Subtitle, subtitle.label, {},
-                                         int(std::ceil(subtitle.duration_sec * timing.FRAME_RATE))});
+            // Snd2Lbl's high bit forces display. It is not part of the string-table key.
+            hud->add_message(HudMessage{HudMsgType::Subtitle, subtitle.label & 0x7FFFFFFFu, {},
+                                         int(std::ceil(subtitle.duration_sec * FrameTiming::kReferenceHz))});
         });
         music = std::make_unique<audio::MusicDirector>(*audio, ctx.music);
         music->start_level(level_id);
@@ -293,10 +360,6 @@ struct SpSession::Impl {
         drones->callbacks().on_anim_sound = [this](drone::Drone& drone, int sfx_id) {
             audio->play_sfx(std::uint32_t(sfx_id), {.position = drone.pos});
         };
-        spsys->on_mission_fail = [this](drone::Drone&, int, std::uint32_t label) {
-            if (label != 0) hud->add_message(HudMessage{HudMsgType::Mission, label, {}, 300});
-            if (mission_sys) mission_sys->fail_mission(label);  // drone reason fails the mission, not just the message
-        };
         // Scoring tables + per-mission counter reset (results score source).
         try {
             score_tables_ = load_plr_score_tables(ctx.action_elf);
@@ -304,7 +367,9 @@ struct SpSession::Impl {
         } catch (const std::exception& e) {
             std::fprintf(stderr, "nightfire: score tables unavailable: %s\n", e.what());
         }
-        plr_.reset_for_mission();
+        plr_ = launch.stats;
+        play_frames = launch.play_frames;
+        plr_.carry_bond_count(launch.bond_count);
         const Player& p = *world->player(0);
         std::printf("%s: %zu placements, %zu npcs, spawn at %.2f,%.2f,%.2f\n", launch.bin.c_str(),
                     level->placements().size(), placed, p.pos[0], p.pos[1], p.pos[2]);
@@ -341,7 +406,14 @@ struct SpSession::Impl {
 
     void audio_frame(const Vec3& previous_pos) {
         update_listener();
+        constexpr std::uint32_t watch_laser_sfx = 18; // SFX_GADGET_WATCH_LASER_SHOOT
+        const bool cutting = !weapons->events().beams.empty();
+        if (cutting && !audio->is_playing(watch_laser_sound))
+            watch_laser_sound = audio->play_sfx(watch_laser_sfx);
+        else if (!cutting && watch_laser_sound != 0)
+            audio->stop_sfx(std::exchange(watch_laser_sound, 0));
         for (const SoundEvent& e : weapons->events().sounds) {
+            if (e.id == int(watch_laser_sfx)) continue; // owned by beam activity, not its animation cue
             if (e.positional) {
                 if (const auto* def = archive->sfx_defaults(std::uint32_t(e.id)); def && def->alertness > 0.0f)
                     drones->emit_noise(e.position, def->alertness, e.exclude);
@@ -386,7 +458,7 @@ struct SpSession::Impl {
         if (launch.give < 0 || give_done) return;
         if (weapons->state(0) == nullptr) return;
         if (!give_given) {
-            if (!weapons->give_weapon(0, launch.give, 999)) return;
+            if (!weapons->owns(0, launch.give) && !weapons->give_weapon(0, launch.give, 999)) return;
             give_given = true;
         }
         if (weapons->anim_state(0) != WeaponAnim::Idle) return;
@@ -395,7 +467,37 @@ struct SpSession::Impl {
         std::printf("mission: debug give weapon %d equipped\n", launch.give);
     }
 
-    void tick_world(const PadState& pad) {
+    std::uint16_t action_button() {
+        const auto button = ui::action_button(kActUse, world->settings(0).controller_style);
+        return button != 0 ? button : std::uint16_t(kPadCross);
+    }
+
+    bool tick_world(PadState pad) {
+        if (mission_won) pad = compensate_sticks(PadState{});
+        bool skipped = false;
+        const auto* scene = mission_sys ? mission_sys->skippable_cutscene() : nullptr;
+        const auto button = action_button();
+        const bool action = (pad.buttons & button) != 0;
+        if (!action) swallow_action = false;
+        if (skip_prompt_scene != scene || skip_prompt_time <= 0) {
+            skip_prompt_scene = nullptr;
+            skip_prompt_time = 0;
+        }
+        if (scene && action && !previous_action) {
+            swallow_action = true;
+            if (skip_prompt_scene == scene) {
+                mission_sys->skip_cutscene(*world, timing);
+                skipped = true;
+                skip_prompt_scene = nullptr;
+                skip_prompt_time = 0;
+            } else {
+                skip_prompt_scene = scene;
+                skip_prompt_time = 180;
+            }
+        }
+        previous_action = action;
+        if (scene || swallow_action) pad.buttons &= ~button;
+        if (skip_prompt_scene) skip_prompt_time -= timing.mul();
         PadInputs pads{};
         pads[0] = pad;
         // Movers publish before the players collide (MissionSystem::pre_tick). Cross is an
@@ -412,11 +514,15 @@ struct SpSession::Impl {
         if (mission_sys) {
             const auto collected = mission_sys->objects().take_bond_pickups();
             for (unsigned i = 0; i < collected; ++i) plr_.log_bond();
+            bond_pickup_popup |= collected != 0;
         }
         if (weather)
             weather->update(world->player(0)->eye(), timing.FRAME_RATE_MUL, timing.REC_FRAME_RATE,
                             [this](int ch) { return spsys->channels.on(ch); });
-        feed_stats();
+        if (!mission_won) {
+            ++play_frames;
+            feed_stats();
+        }
         poll_mission();
         effects->consume(weapons->events());
         effects->tick(timing.FRAME_RATE_MUL, weapons->projectiles());
@@ -430,6 +536,27 @@ struct SpSession::Impl {
         } else if (!world->player(0)->alive() || spsys->mission_fail_reason != 0) {
             ++death_frames;
         }
+        update_hud();
+        return skipped;
+    }
+
+    void update_hud() {
+        HudState hs;
+        weapons->fill_hud(0, hs);
+        const auto& player = *world->player(0);
+        hs.context_icon = player.icon_context();
+        hs.controller_style = world->settings(0).controller_style;
+        hs.bond_moment = std::exchange(bond_pickup_popup, false);
+        if (const auto* missile = player.alive() && player.enabled() ? weapons->guided_projectile(0) : nullptr) {
+            hs.redeemer_flying = true;
+            hs.redeemer_charge = missile->travelled / weapons->table().weapon(missile->weapon).range;
+            hs.crosshair_enabled = false;
+        }
+        hud->enable(HudPane::Redeemer, hs.redeemer_flying);
+        const bool wall_hug = !(mission_sys && mission_sys->script_camera()) && player.substate == SubState::Creep;
+        if (wall_hug) hs.cam_mode = 1;
+        if (hud->enabled(HudPane::Ammo) == wall_hug) hud->enable(HudPane::Ammo, !wall_hug);
+        hud->update(hs);
     }
 
     // PlrStat counter feed (Log* mirrors): trigger pulls from the muzzle edge, hits and
@@ -437,21 +564,21 @@ struct SpSession::Impl {
     // Detections, disabled/surrender detail, health and bond ids have no observable source
     // yet and stay 0 (documented in plr_stats.hpp).
     void feed_stats() {
-        if (const PlayerWeapons* p = weapons->state(0)) {
-            if (p->muzzle_frames > prev_muzzle_) plr_.log_shot_fired();
-            prev_muzzle_ = p->muzzle_frames;
-        }
+        for (int slot : weapons->events().player_shots)
+            if (slot == 0) plr_.log_shot_fired();
         for (const ImpactEvent& e : weapons->events().impacts) {
             if (e.shooter != 0) continue;
-            if (e.on_body) plr_.log_shot_hit_enemy();
-            else plr_.log_shot_hit_scenery();
+            const auto& weapon = weapons->table().weapon(e.weapon);
+            if ((weapon.flags2 & wf2::kLaserBeam) != 0 || (weapon.flags3 & wf3::kGrapple) != 0 ||
+                weapon.base == 1) continue;
+            if (e.on_body || (mission_sys && mission_sys->hit_copter_hull(e))) plr_.log_shot_hit_enemy();
         }
         const std::uint64_t deaths = spsys->stats.deaths;
         while (prev_deaths_ < deaths) {
             plr_.log_kill();
             ++prev_deaths_;
         }
-        if (mission_sys) plr_.set_elapsed_100ths(std::uint32_t(mission_sys->stats().frames * 100u / 30u));
+        plr_.set_elapsed_100ths(std::uint32_t(play_frames * 100u / unsigned(timing.FRAME_RATE_INT)));
     }
     CharacterInstance* sample_actor(const CutscenePlayer::ActorPose& pose) {
         auto& actor = script_characters[{pose.skin, pose.script}];
@@ -460,9 +587,9 @@ struct SpSession::Impl {
             if (!skin) return nullptr;
             auto model = std::make_unique<CharacterInstance>(*bank, *skin);
             if (!model->play(pose.script, false)) return nullptr;
-            model->extract_root_motion(false);
             actor = std::move(model);
         }
+        actor->extract_root_motion(pose.transform != identity());
         actor->set_frame(pose.frame);
         return actor.get();
     }
@@ -482,7 +609,7 @@ struct SpSession::Impl {
             if (s.actor.skin != 0) {
                 if (auto* actor = sample_actor(s.actor)) {
                     const Mat4 root = actor->bone_world(0);
-                    options.position = Vec3{root[12], root[13], root[14]};
+                    options.position = transform_point(s.actor.transform, {root[12], root[13], root[14]});
                 }
             }
         }
@@ -519,6 +646,7 @@ struct SpSession::Impl {
 
     void poll_mission() {
         if (!mission_sys) return;
+        if (auto smoke = mission_sys->take_copter_smoke()) effects->emit_aircraft_smoke(*smoke);
         for (const auto& spawn : mission_sys->take_spawns()) spsys->spawn_scripted(spawn.pos, spawn.args);
         for (const MissionSystem::Sound& s : mission_sys->take_sounds()) play_mission_sound(s);
         for (const MissionSystem::Text& t : mission_sys->take_texts()) {
@@ -550,12 +678,18 @@ struct SpSession::Impl {
         wc.fovy = kViewFovY / std::max(1.0f, weapons->zoom(0));
         const Player& player = *world->player(0);
         const auto cutscene = mission_sys ? mission_sys->script_camera() : std::nullopt;
+        const auto* missile = !cutscene && player.alive() && player.enabled() ? weapons->guided_projectile(0) : nullptr;
         const bool wall_hug = !cutscene && player.substate == SubState::Creep;
         if (cutscene) {
             const Vec3& f = cutscene->forward;
             wc = camera_for_eye_yaw_pitch(cutscene->eye, std::atan2(f[0], f[2]),
                                           std::asin(std::clamp(f[1], -1.0f, 1.0f)));
             wc.fovy = cutscene->fov;
+        } else if (missile) {
+            const Vec3& f = missile->dir;
+            const auto eye = missile->previous_pos + (missile->pos - missile->previous_pos) * interpolation;
+            wc = camera_for_eye_yaw_pitch(eye, std::atan2(f[0], f[2]), std::asin(std::clamp(f[1], -1.0f, 1.0f)));
+            wc.fovy = kViewFovY;
         } else if (wall_hug) {
             const Vec3 target = player.pos + Vec3{0, 0.25f, 0};
             const Vec3 facing{std::sin(player.yaw), 0, std::cos(player.yaw)};
@@ -576,7 +710,14 @@ struct SpSession::Impl {
         glScissor(gv.x, gl_y, gv.w, gv.h);
         glClearColor(0.25f, 0.3f, 0.4f, 1);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        if (mission_sys) renderer->set_hidden_placements(mission_sys->hides());
+        if (mission_sys) {
+            const int room = (cutscene || wall_hug || missile) ? RoomMap::kNone : player.water.room;
+            auto hidden = world->rooms().hidden_geometry(world->collision(), wc.eye,
+                                                         renderer->view_projection(wc, aspect), room);
+            const auto& objects = mission_sys->hides();
+            hidden.insert(hidden.end(), objects.begin(), objects.end());
+            renderer->set_hidden_placements(std::move(hidden));
+        }
         renderer->draw(wc, aspect, false);
         if (weather && weather->active())
             weather->draw(wc, renderer->view_projection(wc, aspect));
@@ -584,17 +725,22 @@ struct SpSession::Impl {
             drone_renderer->draw(wc, aspect, *drones, interpolation,
                                  [this](const Vec3& root) { return character_lighting(root); });
         auto object_draws = effects->take_blast_draws(interpolation);
+        const auto rockets = effects->projectile_draws(weapons->projectiles(), interpolation, missile);
+        object_draws.insert(object_draws.end(), rockets.begin(), rockets.end());
         if (mission_sys) {
             for (const auto& draw : mission_sys->draws()) {
                 const auto& placement = level->placements()[draw.placement];
-                object_draws.push_back({placement.chunk, placement.model, draw.transform});
+                object_draws.push_back({placement.chunk, draw.model == SIZE_MAX ? placement.model : draw.model,
+                                        draw.transform, draw.tint});
             }
+            for (const auto& model : mission_sys->script_models())
+                object_draws.push_back({model.chunk, model.model, model.transform});
             for (const auto& pose : mission_sys->script_actors()) {
                 auto* actor = sample_actor(pose);
                 if (!actor) continue;
                 const Mat4 root = actor->bone_world(0);
-                const Vec3 position{root[12], root[13], root[14]};
-                chars->draw(wc, aspect, actor->skin(), actor->palette(), identity(), 0, actor->facial(),
+                const Vec3 position = transform_point(pose.transform, {root[12], root[13], root[14]});
+                chars->draw(wc, aspect, actor->skin(), actor->palette(), pose.transform, 0, actor->facial(),
                             character_lighting(position));
             }
         }
@@ -616,7 +762,7 @@ struct SpSession::Impl {
             vm.muzzle_flash =
                 previous_viewmodel.muzzle_flash + (vm.muzzle_flash - previous_viewmodel.muzzle_flash) * interpolation;
         }
-        if (!cutscene && !wall_hug && vm.visible && vm.skin && vm.anim) {
+        if (!cutscene && !missile && !wall_hug && vm.visible && vm.skin && vm.anim) {
             const auto& def = weapons->table().weapon(vm.weapon);
             const Vec3 muzzle = weapon_view->draw(wc, aspect, vm, def, effects->lighting_at(wc.eye, 2.0f),
                                                   &world->collision());
@@ -625,13 +771,6 @@ struct SpSession::Impl {
         glEnable(GL_DEPTH_TEST);
         glDisable(GL_BLEND);
         // HUD overlay (the ui canvas letterboxes over the 3D frame; no clear).
-        HudState hs;
-        weapons->fill_hud(0, hs);
-        hs.context_icon = world->player(0)->icon_context();   // HUD_UpdateHealthPane reads BLData+0x95F
-        hs.controller_style = world->settings(0).controller_style;
-        if (wall_hug) hs.cam_mode = 1;
-        if (hud->enabled(HudPane::Ammo) == wall_hug) hud->enable(HudPane::Ammo, !wall_hug);
-        hud->update(hs);
         ui.begin(width, height, false);
         ui::select_prompts(0, InputContext::OnFoot);
         if (cutscene) {
@@ -639,6 +778,20 @@ struct SpSession::Impl {
             constexpr float bar = 64.0f;
             ui.fill({edge, 0, ui.canvas_width(), bar}, {0, 0, 0, 255});
             ui.fill({edge, ui::kScreenH - bar, ui.canvas_width(), bar}, {0, 0, 0, 255});
+            ui.set_blend(ui::Blend::Additive); // Script_SpriteStart sets GS blend flag 0x100
+            for (const auto& sprite : mission_sys->script_sprites()) {
+                const auto [width, height] = ui.texture_size(sprite.hash);
+                if (width == 0 || height == 0) continue;
+                const bool flip_x = (sprite.flags & 2) != 0;
+                const bool flip_y = (sprite.flags & 4) != 0;
+                constexpr float y_scale = ui::kScreenH / 480.0f;
+                ui.draw(sprite.hash, {float(sprite.x), sprite.y * y_scale, float(sprite.w), sprite.h * y_scale},
+                        {flip_x ? float(width) : 0.0f, flip_y ? float(height) : 0.0f,
+                         float(width) * (flip_x ? -1 : 1), float(height) * (flip_y ? -1 : 1)},
+                        {0x80, 0x80, 0x80, 0x80});
+            }
+            ui.set_blend(ui::Blend::Alpha);
+            hud->draw_subtitle(ui, text);
         } else {
             hud->draw(ui, text);
         }
@@ -646,6 +799,13 @@ struct SpSession::Impl {
         if (mission_sys && mission_sys->fade() > 0.001f) {
             const auto a = std::uint8_t(std::clamp(mission_sys->fade(), 0.0f, 1.0f) * 128.0f);
             ui.fill({0, 0, ui::kScreenW, ui::kScreenH}, {0x00, 0x00, 0x00, a});
+        }
+        if (skip_prompt_time > 0 && skip_prompt_scene && mission_sys->skippable_cutscene() == skip_prompt_scene) {
+            const char glyph = ui::prompt_key(action_button());
+            const std::string action = glyph ? std::string("~") + glyph : "Action";
+            text.draw((ui.canvas_width() + ui::kScreenW) * .5f - 20, ui::kScreenH - 24,
+                      "Press " + action + " again to skip",
+                      ui::TextStyle{.font = 2, .drop_shadow = true, .align = ui::Align::Right});
         }
         ui.end();
         glDisable(GL_BLEND);
@@ -655,6 +815,7 @@ struct SpSession::Impl {
     // Pause / end-mission menu on the shared window. Returns Resume (false) or the session exit.
     std::optional<SpResult> run_menu(std::optional<std::uint32_t> page) {
         if (!has_level_menu) return std::nullopt;
+        if (watch_laser_sound != 0) audio->stop_sfx(std::exchange(watch_laser_sound, 0));
         Frontend menu(ctx.assets, level_menu, &ctx.mp_data, &ctx.sp_data);
         PauseInfo info;
         if (mission_sys) {
@@ -695,11 +856,23 @@ struct SpSession::Impl {
         }
         PadHistory hist;
         bool wait_release = true;
+        bool checkpoints_open = false;
+        int checkpoint_row = 0;
+        const bool checkpoints_available = !page && level_id >= 0x07000005 && level_id <= 0x07000008;
         while (!menu.wants_close()) {
             SDL_Event e;
             while (SDL_PollEvent(&e)) {
                 if (e.type == SDL_EVENT_QUIT) return SpResult{SpExit::QuitToMenu};
-                if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE && !page) return std::nullopt;  // Esc resumes pause
+                if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && !page) {
+                    if (e.key.key == SDLK_ESCAPE) {
+                        if (!checkpoints_open) return std::nullopt;
+                        checkpoints_open = false;
+                        wait_release = true;
+                    } else if (e.key.key == SDLK_F6 && checkpoints_available) {
+                        checkpoints_open = !checkpoints_open;
+                        wait_release = true;
+                    }
+                }
             }
             const PadState s = menu_pad(gamepad);
             if (wait_release) {
@@ -708,7 +881,18 @@ struct SpSession::Impl {
             } else {
                 hist.push(s);
             }
-            menu.update(hist);
+            if (checkpoints_available && hist.pressed(kPadSelect)) checkpoints_open = !checkpoints_open;
+            else if (checkpoints_open) {
+                const int count = int(std::size(kExchangeCheckpoints));
+                if (hist.pressed(kPadUp)) checkpoint_row = (checkpoint_row + count - 1) % count;
+                if (hist.pressed(kPadDown)) checkpoint_row = (checkpoint_row + 1) % count;
+                if (hist.pressed(kPadCircle)) checkpoints_open = false;
+                if (hist.pressed(kPadCross)) {
+                    SpResult result{SpExit::Restart};
+                    result.checkpoint = kExchangeCheckpoints[checkpoint_row].key;
+                    return result;
+                }
+            } else menu.update(hist);
             // C_NIS accept: play the requested level cutscene and resume into it.
             if (mission_sys) {
                 if (const std::uint32_t nis = menu.take_nis_request()) {
@@ -722,6 +906,24 @@ struct SpSession::Impl {
             if (!page) ui.draw_backdrop();
             ui::select_prompts(0, InputContext::Menu);
             menu.draw(ui, text);
+            if (checkpoints_open) {
+                const float x = (ui::kScreenW - 364) * .5f;
+                ui.fill({x, 88, 364, 257}, {14, 24, 31, 255});
+                text.draw(x + 24, 126, "Debug Checkpoints", ui::TextStyle{.font = 3});
+                for (int i = 0; i < int(std::size(kExchangeCheckpoints)); ++i) {
+                    const float y = 169.0f + i * 32.0f;
+                    if (i == checkpoint_row) ui.fill({x + 15, y - 19, 334, 28}, {42, 72, 86, 255});
+                    text.draw(x + 24, y, kExchangeCheckpoints[i].name, ui::TextStyle{.font = 2});
+                }
+                text.draw(x + 24, 320, "~A Launch     ~X Back", ui::TextStyle{.font = 2});
+            } else if (checkpoints_available) {
+                const ui::TextStyle style{.font = 2, .align = ui::Align::Center};
+                constexpr std::string_view label = "F6 / ~T Debug Checkpoints";
+                const float width = text.measure(label, style).width + 20;
+                const float centre = ui::kScreenW * .5f;
+                ui.fill({centre - width * .5f, ui::kScreenH - 39, width, 26}, {14, 24, 31, 255});
+                text.draw(centre, ui::kScreenH - 20, label, style);
+            }
             ui.end();
             window.swap();
             SDL_Delay(33);
@@ -730,18 +932,6 @@ struct SpSession::Impl {
         if (r.action == FrontendResult::Action::Resume) return std::nullopt;
         if (r.action == FrontendResult::Action::RestartMission) return SpResult{SpExit::Restart};
         return SpResult{SpExit::QuitToMenu};
-    }
-
-    // sp_level id after this mission (pending destination, else the next row in sp_level order, else 0).
-    std::uint32_t next_level_id() const {
-        if (mission_sys && mission_sys->pending_level() != 0) return mission_sys->pending_level();
-        const std::vector<SpLevelRow> rows = load_sp_level_order(ctx.action_elf);
-        for (std::size_t i = 0; i < rows.size(); ++i) {
-            if (rows[i].level != level_id) continue;
-            if (i + 1 < rows.size()) return rows[i + 1].level;
-            return 0;  // last mission: the bonus chain leads to wingame, then the frontend
-        }
-        return 0;
     }
 
     std::optional<SpResult> continuation() const {
@@ -753,48 +943,58 @@ struct SpSession::Impl {
         const auto target = std::find_if(rows.begin(), rows.end(), [&](const MissionEntry& e) { return e.level == next; });
         if (current == rows.end() || target == rows.end() || current->base != target->base || next == level_id)
             return std::nullopt;
-        return SpResult{SpExit::NextMission, false, false, next, mission_sys->carried_inventory(),
-                        mission_sys->exit_channel()};
+        SpResult result{SpExit::NextMission, false, false, next, mission_sys->carried_inventory(),
+                        mission_sys->exit_channel(), plr_.bond_count()};
+        result.stats = plr_;
+        result.play_frames = play_frames;
+        return result;
     }
 
-    // Results content for P_NFRESULTS (stats + next-mission name).
-    std::pair<MissionResults, std::uint32_t> build_results() {
+    void setup_results(Frontend& menu, bool persist) {
+        const std::string codename = user_config.profile.empty() ? "Bond" : user_config.profile;
+        const std::uint32_t base = mission_base != 0 ? mission_base : level_id;
+        Profile profile = load_profile(codename).value_or(fresh_profile(codename));
+        profile.difficulty = std::uint32_t(launch.difficulty);
+        menu.set_profile(std::move(profile));
+
         MissionResults results;
-        if (mission_sys) {
-            const MissionSystem::Stats& st = mission_sys->stats();
-            const long secs = long(st.frames) / 30;
-            char time[32];
-            std::snprintf(time, sizeof(time), "%ld:%02ld", secs / 60, secs % 60);
-            // Difficulty arrives as 1/2/3 (GameState+0x28) or 0/1/2 (menu/CLI index); normalize.
-            const int d = launch.difficulty;
-            const int difficulty = (d >= 1 && d <= 3) ? d : (d >= 0 && d <= 2) ? d + 1 : 2;
-            PlrStats::Score score{};
-            if (score_tables_ok_) score = plr_.compute(score_tables_, level_id, difficulty, mission_won);
-            if (score.valid) results.score_text = separate_number(score.total);
-            results.stats = {{"Time", time},
-                             {"Shots", std::to_string(st.shots)},
-                             {"Hits", std::to_string(st.hits)},
-                             {"Kills", std::to_string(mission_sys->kills())}};
-            if (score.valid && score.done_better) results.stats.emplace_back("Best", "New!");
+        PlrStats::Score score{};
+        if (score_tables_ok_) score = plr_.compute(score_tables_, base, launch.difficulty, mission_won);
+        int medal = 0;
+        if (score.valid) {
+            results.score_text = separate_number(score.total);
+            const auto* row = score_tables_.find(base);
+            while (medal < 4 && score.total >= row->totals[std::size_t(medal)]) ++medal;
+            results.medal_sprite = kCampaignMedalSprites[medal];
+            if (medal != 0) results.name_line = std::string(ctx.assets.strings.label(0x2cb - medal));
+            results.next_target_text = separate_number(row->totals[std::size_t(std::min(medal, 3))]);
         }
-        const std::uint32_t next = next_level_id();
-        if (next != 0) {
-            for (const SpLevelRow& row : load_sp_level_order(ctx.action_elf)) {
-                if (row.level != next) continue;
-                const std::string_view name = ctx.assets.strings.label(row.name);
-                if (!name.empty()) results.next_target_text = std::string(name);
-                break;
-            }
-        }
-        return {results, next};
+        const auto seconds = play_frames / unsigned(timing.FRAME_RATE_INT);
+        char time[32];
+        std::snprintf(time, sizeof(time), "%llu:%02llu", static_cast<unsigned long long>(seconds / 60),
+                      static_cast<unsigned long long>(seconds % 60));
+        results.stats = {{"Time", time},
+                         {"Shots", std::to_string(plr_.shots())},
+                         {"Hits", std::to_string(plr_.hits())},
+                         {"Kills", std::to_string(plr_.kills())},
+                         {"007 Tokens", std::to_string(plr_.bond_count())}};
+        if (score.valid && score.total > std::uint32_t(std::max(0, menu.profile().best_score(base))))
+            results.stats.emplace_back("Best", "New!");
+        results.leads_to_wingame = !ctx.sp_data.levels.empty() && base == ctx.sp_data.levels.back().value;
+        if (results.leads_to_wingame)
+            menu.set_credits(load_credits(ctx.action_elf, ctx.assets.strings));
+        menu.complete_mission(base, int(score.total), medal);
+        if (persist && !nf::save_profile(menu.profile()))
+            std::fprintf(stderr, "nightfire: could not save mission progress for %s\n", codename.c_str());
+
+        menu.set_dossier(DossierInfo{.mission_level = base});
+        menu.set_mission_results(std::move(results));
     }
 
     // Headless results shot (the interactive run_results drove the same page with live input).
     void draw_results_shot(const std::string& path) {
-        const auto [results, next] = build_results();
-        (void)next;
         Frontend menu(ctx.assets, ctx.menu, &ctx.mp_data, &ctx.sp_data);
-        menu.set_mission_results(results);
+        setup_results(menu, false);
         menu.open(FrontendMode::MainMenu, kPageResults);
         PadHistory hist;
         for (int i = 0; i < 30; ++i) {
@@ -811,11 +1011,17 @@ struct SpSession::Impl {
         std::printf("results -> %s\n", path.c_str());
     }
 
-    // Mission-complete results (P_NFRESULTS) on the frontend script. MissionDone continues to next_level_id().
-    std::optional<SpResult> run_results() {
+    SpResult run_results() {
         Frontend menu(ctx.assets, ctx.menu, &ctx.mp_data, &ctx.sp_data);
-        const auto [results, next] = build_results();
-        menu.set_mission_results(results);
+        setup_results(menu, true);
+        audio->stop_music();
+        audio->clear_map_sounds();
+        audio->unload_all_banks();
+        if (const auto movie = mission_outro(level_id)) {
+            MovieScreen screen(window, ui, text, audio.get(), gamepad, ctx.gamedir);
+            screen.play(movie);
+        }
+        play_menu_music(menu_audio, kMenuBondTheme, config.music_volume);
         menu.open(FrontendMode::MainMenu, kPageResults);
         PadHistory hist;
         bool wait_release = true;
@@ -832,8 +1038,15 @@ struct SpSession::Impl {
                 hist.push(s);
             }
             menu.update(hist);
+            if (menu.page_id() == 0x40000002) break;
+            if (menu_audio) {
+                pump_menu_sounds(menu.take_sounds(), [this](std::uint32_t id) { menu_audio->play_sfx(id); });
+                menu_audio->update();
+                menu_audio->update();
+            }
             // Results chain movies (wingame): play fullscreen, then run the post-movie transition.
             if (std::uint32_t movie = menu.take_movie_request()) {
+                stop_menu_music(menu_audio);
                 MovieScreen screen(window, ui, text, audio.get(), gamepad, ctx.gamedir);
                 screen.play(movie);
                 menu.movie_finished();
@@ -848,14 +1061,14 @@ struct SpSession::Impl {
             SDL_Delay(33);
         }
         if (menu.result().action == FrontendResult::Action::MissionDone)
-            return SpResult{SpExit::NextMission, false, true, next};
+            return SpResult{SpExit::MissionSelect, false, true};
         return SpResult{SpExit::QuitToMenu, false, true, 0};
     }
 };
 
 SpSession::SpSession(AppContext& ctx, Window& window, ui::Renderer& ui, ui::TextRenderer& text, const SpLaunch& launch,
-                     AppConfig& cfg)
-    : impl_(std::make_unique<Impl>(ctx, window, ui, text, launch, cfg)) {
+                     AppConfig& cfg, audio::AudioSystem* menu_audio)
+    : impl_(std::make_unique<Impl>(ctx, window, ui, text, launch, cfg, menu_audio)) {
     ready_ = impl_->build();
 }
 
@@ -871,6 +1084,7 @@ SpResult SpSession::run_interactive() {
         }
         SDL_free(ids);
     }
+    s.pad.set_mouse_sensitivity(s.config.mouse_look_sensitivity);
     const bool has_audio = s.audio->open_device();
     std::printf("audio: output device %s\n", has_audio ? "open" : "none");
 
@@ -912,7 +1126,7 @@ SpResult SpSession::run_interactive() {
         accumulator = std::min(accumulator + double(now - last) * 1e-9, 0.25);
         last = now;
         while (accumulator >= kStep) {
-            PadState pad = s.pad.sample();
+            PadState pad = s.pad.sample(s.world->settings(0).invert_look);
             if (pad.buttons & kPadStart) {
                 if (auto r = s.run_menu(std::nullopt)) {
                     done = *r;
@@ -931,24 +1145,24 @@ SpResult SpSession::run_interactive() {
             previous_eye = previous_player.shaken_eye();
             previous_yaw = previous_player.yaw;
             previous_pitch = previous_player.view_pitch();
-            s.tick_world(pad);
+            if (s.tick_world(pad)) {
+                const Player& resumed = *s.world->player(0);
+                previous_eye = resumed.shaken_eye();
+                previous_yaw = resumed.yaw;
+                previous_pitch = resumed.view_pitch();
+            }
             accumulator -= kStep;
             if (auto next = s.continuation()) {
                 done = std::move(*next);
                 finished = true;
                 break;
             }
-            if (s.death_frames > 3 * s.timing.FRAME_RATE_INT && !s.end_shown) {
+            const int end_delay = s.mission_won ? s.timing.FRAME_RATE_INT : 3 * s.timing.FRAME_RATE_INT;
+            if (s.death_frames > end_delay && !s.end_shown) {
                 s.end_shown = true;
                 if (s.mission_won) {
-                    // Mission complete -> results chain, then the next mission.
-                    if (auto r = s.run_results()) {
-                        done = *r;
-                        finished = true;
-                    } else {
-                        done = SpResult{SpExit::QuitToMenu, false, true, 0};
-                        finished = true;
-                    }
+                    done = s.run_results();
+                    finished = true;
                 } else if (auto r = s.run_menu(kPageEndMission)) {
                     done = *r;
                     done.failed = true;

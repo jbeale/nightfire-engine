@@ -45,8 +45,8 @@ bool is_volume_class(std::uint32_t cls) {
 
 }  // namespace
 
-SpObjects::SpObjects(Level& level, std::uint32_t level_id, sp::SwitchChannels& channels)
-    : level_(level), level_id_(level_id), channels_(channels), trigger_volumes_(make_volumes(level)) {
+SpObjects::SpObjects(Level& level, std::uint32_t level_id, sp::SwitchChannels& channels, int difficulty)
+    : level_(level), level_id_(level_id), difficulty_(difficulty), channels_(channels), trigger_volumes_(make_volumes(level)) {
     // Level-load draws (e.g. searchlight sweep phases) go to the process-global stream.
 }
 
@@ -76,6 +76,11 @@ void SpObjects::build() {
         if ((s.flags & 0x8000) != 0) continue;  // world cel, not an object
         const std::uint32_t cls = s.object_class();
         switch (cls) {
+        case 0x3b: {  // DynamicObject_Create / Update
+            const auto show = uparam16(s, 0);
+            dynamic_blockers_.push_back({i, show, uparam16(s, 1), uparam(s, 3) != 0, show == 0});
+            break;
+        }
         case 219: {  // Door_Create: p0 flags, p1 group, p2 unlock, p3 lock, p5/6/7 sounds
             DoorObject d;
             d.placement = i;
@@ -92,6 +97,11 @@ void SpObjects::build() {
             d.rate = 1.0f / 60.0f;  // full swing in ~1 s at 30 Hz (see `Door_Interp` advance)
             d.spline = uparam(s, 4) != 0;  // `+112 & 1`: spline vs keyframe framelist eval
             d.auto_door = (d.flags & 2) != 0;  // `obj+244 & 2`: proximity doors (data: p0 = 2)
+            const auto state_flags = uparam(s, 8) | uparam(s, 9);
+            d.opening = (state_flags & 4) != 0;
+            d.progress = d.opening ? 1.0f : 0.0f;
+            d.hold_open = (state_flags & 0x20) != 0;
+            if (d.opening && d.unlock_channel != 0) channels_.set(d.unlock_channel, true);
             doors_.push_back(d);
             break;
         }
@@ -107,6 +117,12 @@ void SpObjects::build() {
             for (int k = 0; k < 8; ++k) t.inputs[std::size_t(k)] = uparam16(s, 2 + k);
             t.gate_channel = uparam16(s, 10);
             t.extra = uparam16(s, 11);
+            if (cls != 220) {
+                // The touch wrappers move the editor class mask and shutoff into Trigger_Create's fields.
+                t.touch_mask = uparam16(s, 1);
+                t.disable_channel = uparam16(s, cls == 234 ? 7 : 6);
+                t.gate_channel = 0;
+            }
             triggers_.push_back(t);
             break;
         }
@@ -151,7 +167,17 @@ void SpObjects::build() {
             switches_.push_back(sw);
             break;
         }
-        case 226: {  // SS_Create: out = p0, mask = p1, value = p3, sound = p4
+        case 226: {  // SS_Create: mode = p0, touch mask = p2, value channel = p3
+            if (uparam(s, 0) == 0x40 && uparam(s, 3) != 0 && (uparam(s, 2) & 0x1a) == 0) {
+                DoorObject motion;
+                motion.placement = i;
+                motion.signal_driven = true;
+                motion.open_signal = uparam16(s, 3);
+                motion.open_sound = uparam16(s, 4);
+                motion.spline = uparam(s, 6) != 0;
+                doors_.push_back(motion);
+                break;
+            }
             TriggerObject t;
             t.placement = i;
             t.type = 2;  // touch-driven (SS_Operate: touch bits & mask, or value channel)
@@ -178,6 +204,12 @@ void SpObjects::build() {
             b.gate = uparam16(s, 1);
             b.sound = uparam(s, 4);
             b.center = placement_pos(i);
+            const auto& models = level_.chunks()[p.chunk].chunk.models;
+            const auto replacement = models[p.model].linked_lod;
+            if (replacement >= 0 && std::size_t(replacement) < models.size() && std::size_t(replacement) != p.model) {
+                b.damaged_model = std::size_t(replacement);
+                b.precise_hits = !models[p.model].collision.empty();
+            }
             breakables_.push_back(b);
             break;
         }
@@ -242,7 +274,18 @@ void SpObjects::build() {
             volumes_.push_back(v);
             break;
         }
-        case 46:  // Lock_Create: use -> unlock channel p1 (gated by p0) [INFERENCE]
+        case 46:  // Lock_Create: p0 = lock type, p1 = key, p5 = unlocked channel
+            if (uparam(s, 0) == 1) {
+                DoorObject bolt;
+                bolt.placement = i;
+                bolt.signal_driven = true;
+                bolt.laser_lock = true;
+                bolt.cut_signal = uparam16(s, 5);
+                bolt.spline = true;
+                doors_.push_back(bolt);
+                break;
+            }
+            [[fallthrough]];
         case 48: {  // Monitor_Create: use -> channel p1 [INFERENCE]
             Switch sw;
             sw.placement = i;
@@ -258,12 +301,16 @@ void SpObjects::build() {
             switches_.push_back(sw);
             break;
         }
-        case 51: {  // Hint_Create: label = p0, sfx = p1, gate = p3
+        case 51: {  // Hint_Create: label = p0, sfx = p1, difficulty = p2, channels = p3/p4
+            const auto restriction = uparam(s, 2);
+            if ((restriction >= 5 && restriction <= 7 && int(restriction) - 4 != difficulty_) ||
+                (restriction != 0 && restriction < 5 && int(restriction) < difficulty_)) break;
             Switch sw;
             sw.placement = i;
-            sw.label = uparam16(s, 0);
+            sw.label = uparam(s, 0);
             sw.sound = uparam16(s, 1);
             sw.gate = uparam16(s, 3);
+            sw.disable = uparam16(s, 4);
             switches_.push_back(sw);
             break;
         }
@@ -298,6 +345,7 @@ void SpObjects::build() {
             sp.placement = i;
             sp.hash = uparam(s, 0);
             sp.auto_play = uparam(s, 2) == 1;
+            sp.preload = uparam(s, 2) == 0x40;
             sp.trigger_channel = uparam16(s, 6);
             script_players_.push_back(sp);
             break;
@@ -343,6 +391,7 @@ void SpObjects::build() {
                 d.path = tracks[ref.path_index].keys;
                 d.has_path = true;
                 d.swing = false;
+                if (d.signal_driven) d.rate = 1.0f / (ref.aux == 0 ? 75.0f : float(ref.aux));
             }
         }
     }
@@ -696,6 +745,7 @@ void SpObjects::update_script_entities(const std::vector<ScriptEntity>& ents) {
 }
 
 bool SpObjects::use_door(DoorObject& d) {
+    if (d.signal_driven) return false;
     const auto center = placement_pos(d.placement);
     if (d.lock_channel != 0 && channels_.on(int(d.lock_channel))) {
         texts_.push_back({0x02000003, 180, 1});
@@ -742,6 +792,7 @@ bool SpObjects::activate_at(const Vec3& center, float radius) {
     DoorObject* best_door = nullptr;
     float best_d = radius * radius;
     for (DoorObject& d : doors_) {
+        if (d.signal_driven) continue;
         const float dd = dist_to(d.placement);
         if (dd < best_d) {
             best_d = dd;
@@ -898,7 +949,43 @@ void SpObjects::tick(const std::vector<Toucher>& touchers, const std::vector<boo
                 break;
             }
         }
-        if (d.rate > 0) {
+        if (d.signal_driven) {
+            if (!d.opening && d.laser_lock) {
+                bool heated = false;
+                for (const ImpactEvent& impact : weapon_events.impacts) {
+                    if (impact.on_body || (impact.weapon != 0x4e && impact.weapon != 0x4f)) continue;
+                    if (impact.placement != d.placement) {
+                        // At the seam the frame or door can win the ray by a few centimeters.
+                        // Only accept a contact immediately beside this hinge's authored bounds.
+                        const auto bounds = bounds_.find(d.placement);
+                        if (bounds == bounds_.end()) continue;
+                        const auto& [lo, hi] = bounds->second;
+                        Vec3 nearest;
+                        for (std::size_t axis = 0; axis < 3; ++axis)
+                            nearest[axis] = std::clamp(impact.point[axis], lo[axis], hi[axis]);
+                        if (dist2(impact.point, nearest) > .07f * .07f) continue;
+                    }
+                    d.lock_heat += (impact.weapon == 0x4e ? 3.0f : 10.0f) * dt_frames;
+                    d.cooling_delay = 2;
+                    heated = true;
+                }
+                if (!heated && d.cooling_delay <= 0) d.lock_heat = std::max(0.0f, d.lock_heat - dt_frames);
+                if (!heated) d.cooling_delay -= dt_frames;
+                if (d.lock_heat >= 252) {
+                    d.opening = true;
+                    if (d.cut_signal != 0) channels_.set(d.cut_signal, true);
+                    sounds_.push_back({0x249, center, true});
+                }
+            }
+            if (!d.opening && channels_.on(d.open_signal)) {
+                d.opening = true;
+                if (d.open_sound != 0 && d.open_sound != 0xffff) sounds_.push_back({d.open_sound, center, true});
+            }
+            if (d.opening) {
+                d.progress = std::min(1.0f, d.progress + d.rate * dt_frames);
+                d.lock_heat = std::max(0.0f, d.lock_heat - 2.0f * dt_frames);
+            }
+        } else if (d.rate > 0) {
             if (d.locked_shown) {  // frozen by the denied path; the unlock channel releases it
                 if (d.unlock_channel != 0 && channels_.on(int(d.unlock_channel))) {
                     d.locked_shown = false;
@@ -914,6 +1001,9 @@ void SpObjects::tick(const std::vector<Toucher>& touchers, const std::vector<boo
                 if (d.unlock_channel != 0 && channels_.on(int(d.unlock_channel))) {
                     d.locked_shown = false;
                     d.opening = true;
+                } else if (d.unlock_channel != 0 && d.progress >= 1.0f && !near) {
+                    // A script may clear an already-open door's channel to close it once clear.
+                    d.opening = false;
                 } else if (d.auto_door && near) {
                     d.locked_shown = false;
                     d.opening = true;
@@ -927,12 +1017,13 @@ void SpObjects::tick(const std::vector<Toucher>& touchers, const std::vector<boo
             if (!is_open && was_open && d.close_sound != 0) sounds_.push_back({d.close_sound, center, true});
             if (is_open && !near) {
                 d.idle_frames += 1.0f;  // auto-close after ~6 s clear (`Door_Update` 6*FRAME_RATE_INT)
-                if (d.auto_door && d.idle_frames > 180.0f) d.opening = false;
+                if (d.auto_door && !d.hold_open && d.idle_frames > 180.0f) d.opening = false;
             } else {
                 d.idle_frames = 0;
             }
-            // `Door_SetState` reports the open state back on the unlock channel.
-            if (d.unlock_channel != 0) channels_.set(int(d.unlock_channel), is_open);
+            // `Door_SetState` reports a change. Reasserting on every tick masks scripted clears.
+            if (d.unlock_channel != 0 && was_open != is_open)
+                channels_.set(d.unlock_channel, is_open);
         }
         // Publish the solid: the model-space box posed by the live matrix (correct for both
         // sliders and swung panels); falls back to the shifted closed box without local bounds.
@@ -973,14 +1064,38 @@ void SpObjects::tick(const std::vector<Toucher>& touchers, const std::vector<boo
         DrawOverride dr;
         dr.placement = d.placement;
         dr.transform = pose;
+        const float heat = d.lock_heat / 255.0f;
+        dr.tint = {1.0f + heat, 1.0f - heat, 1.0f - heat};
         draws_.push_back(dr);
         hides_.push_back(d.placement);
     }
     // ---- touch triggers ----
     for (TriggerObject& t : triggers_) {
         if (t.gate_channel != 0 && !channels_.on(int(t.gate_channel))) continue;
+        if (channels_.on(t.disable_channel)) continue;
         const bool mesh_trigger = (t.type == 1 || t.type == 2) && trigger_meshes_[t.placement];
-        const bool touch = mesh_trigger && has_capsule ? touched_meshes[t.placement] : touching(t.placement, true);
+        bool player_touch = (t.touch_mask & 8) != 0 &&
+            (mesh_trigger && has_capsule ? touched_meshes[t.placement] : touching(t.placement, true));
+        if (!player_touch && (t.touch_mask & 8) != 0 && t.type == 2 && mesh_trigger) {
+            // A capsule wholly inside a touch volume may miss every boundary triangle.
+            const auto& [lo, hi] = bounds_.at(t.placement);
+            player_touch = std::any_of(touchers.begin(), touchers.end(), [&](const Toucher& actor) {
+                const auto& p = actor.pos;
+                return actor.is_player && p[0] >= lo[0] && p[0] <= hi[0] &&
+                       p[1] >= lo[1] && p[1] <= hi[1] && p[2] >= lo[2] && p[2] <= hi[2];
+            });
+        }
+        const bool drone_touch = (t.touch_mask & 0x10) != 0 &&
+            std::any_of(touchers.begin(), touchers.end(), [&](const Toucher& actor) {
+                if (actor.is_player || !touch_test(t.placement, actor)) return false;
+                if (!mesh_trigger || !actor.capsule) return true;
+                auto capsule = *actor.capsule;
+                capsule.hit = hitflag::kNoPushOut;
+                const auto hits = trigger_volumes_.cylinder(capsule).hits;
+                return std::any_of(hits.begin(), hits.end(),
+                    [&](const CollisionHit& hit) { return hit.placement == t.placement; });
+            });
+        const bool touch = player_touch || drone_touch;
         const bool was = t.touched;
         t.touched = touch;
         switch (t.type) {
@@ -1087,6 +1202,14 @@ void SpObjects::tick(const std::vector<Toucher>& touchers, const std::vector<boo
         }
     }
     tick_switches(touchers, use_pressed);
+    for (auto& blocker : dynamic_blockers_) {
+        if (!blocker.removed && (blocker.show_channel == 0 || channels_.on(blocker.show_channel))) {
+            const bool hide = channels_.on(blocker.hide_channel);
+            blocker.removed = hide && !blocker.reversible;
+            blocker.visible = !hide;
+        }
+        if (!blocker.visible) hides_.push_back(blocker.placement);
+    }
     tick_damage(touchers, weapon_events, dt_frames, weapons, hurt);
 }
 void SpObjects::tick_switches(const std::vector<Toucher>& touchers, const std::vector<bool>& use_pressed) {
@@ -1112,8 +1235,12 @@ void SpObjects::tick_switches(const std::vector<Toucher>& touchers, const std::v
             use_switch(sw);
             continue;
         }
-        if (cls == 51) {  // Hint: gate edge shows the text once
-            if (sw.gate != 0 && channels_.on(int(sw.gate)) && !sw.fired) {
+        if (cls == 51) {  // Hint: a player touching the volume sees the text once
+            if (channels_.on(sw.disable)) sw.fired = true;
+            if (!sw.fired && (sw.gate == 0 || channels_.on(sw.gate)) &&
+                std::any_of(touchers.begin(), touchers.end(), [&](const Toucher& t) {
+                    return t.is_player && touch_test(sw.placement, t);
+                })) {
                 sw.fired = true;
                 texts_.push_back({sw.label, 180, 1});
                 if (sw.sound != 0 && sw.sound != 0xFFFF) {
@@ -1121,7 +1248,6 @@ void SpObjects::tick_switches(const std::vector<Toucher>& touchers, const std::v
                     sounds_.push_back({sw.sound, pp, false});
                 }
             }
-            if (sw.gate != 0 && !channels_.on(int(sw.gate))) sw.fired = false;
             continue;
         }
         if (cls == 249) {  // SoundTrigger: rising edge on either channel plays once
@@ -1145,7 +1271,8 @@ void SpObjects::tick_switches(const std::vector<Toucher>& touchers, const std::v
 }
 
 std::optional<Vec3> SpObjects::update_searchlights(const std::vector<Toucher>& touchers,
-                                                        const CollisionWorld& world, float frames) {
+                                                  const CollisionWorld& world, float frames,
+                                                  const CollisionWorld* moving) {
     std::optional<Vec3> detected;
     const auto orient = [](const Vec3& forward, const Vec3& up, const Vec3& pos, float reach = 1.0f) {
         Vec3 lateral = cross(up, forward);
@@ -1170,12 +1297,18 @@ std::optional<Vec3> SpObjects::update_searchlights(const std::vector<Toucher>& t
         }
         const Vec3 dir{std::sin(light.yaw) * std::cos(light.pitch), std::sin(light.pitch),
                        std::cos(light.yaw) * std::cos(light.pitch)};
-        const auto impact = world.ray(origin + dir * 0.15f, origin + dir * 100.0f, pick::kIgnoreGhost);
+        const Vec3 beam_start = origin + dir * 0.15f, beam_end = origin + dir * 100.0f;
+        auto impact = world.ray(beam_start, beam_end, pick::kIgnoreGhost);
+        if (moving) {
+            const auto hit = moving->ray(beam_start, beam_end, pick::kIgnoreGhost);
+            if (hit && (!impact || hit->dist < impact->dist)) impact = hit;
+        }
         bool was_lit = false;
         if (impact) {
             for (const Toucher& p : touchers) {
                 if (!p.is_player || length(p.pos - impact->point) > 2.0f) continue;
-                if (!world.line_of_sight(origin + dir * 0.15f, p.pos, pick::kIgnoreGhost)) continue;
+                if (!world.line_of_sight(beam_start, p.pos, pick::kIgnoreGhost) ||
+                    (moving && !moving->line_of_sight(beam_start, p.pos, pick::kIgnoreGhost))) continue;
                 detected = p.pos;
                 was_lit = true;
                 const Vec3 to = p.pos - Vec3{0, 1, 0} - origin;
@@ -1221,7 +1354,11 @@ void SpObjects::tick_damage(const std::vector<Toucher>& touchers, const WeaponEv
             continue;
         }
         for (const ImpactEvent& im : weapon_events.impacts) {
-            if (dist2(im.point, b.center) < (b.radius + 0.5f) * (b.radius + 0.5f)) b.hp -= 25.0f;
+            if (im.on_body || im.weapon == 0x4e || im.weapon == 0x4f) continue;
+            const bool hit = b.precise_hits
+                ? im.placement == b.placement
+                : dist2(im.point, b.center) < (b.radius + .5f) * (b.radius + .5f);
+            if (hit) b.hp -= 25.0f;
         }
         for (const ExplosionEvent& ex : weapon_events.explosions) {
             if (dist2(ex.position, b.center) < (b.radius + ex.radius) * (b.radius + ex.radius)) b.hp -= 100.0f;
@@ -1231,8 +1368,11 @@ void SpObjects::tick_damage(const std::vector<Toucher>& touchers, const WeaponEv
             if (b.sound != 0 && b.sound != 0xFFFF) sounds_.push_back({b.sound, b.center, true});
         }
     }
-    for (Breakable& b : breakables_) {
-        if (b.broken) hides_.push_back(b.placement);
+    for (const Breakable& b : breakables_) {
+        if (!b.broken) continue;
+        hides_.push_back(b.placement);
+        if (b.damaged_model != SIZE_MAX)
+            draws_.push_back({b.placement, level_.placements()[b.placement].transform, false, b.damaged_model});
     }
     // Fixed sensors: cone trip raises the alarm channel.
     for (Sensor& se : sensors_) {
@@ -1320,6 +1460,7 @@ void SpObjects::tick_damage(const std::vector<Toucher>& touchers, const WeaponEv
     }
     // Pickups: walk-over grants with respawn.
     for (PickupObj& pk : pickups_) {
+        if (pk.kind == 4 && pk.channel != 0 && channels_.on(pk.channel)) pk.taken = true;
         if (pk.taken) {
             if (pk.respawn != 0) {
                 pk.respawn_in -= 1.0f;
@@ -1344,11 +1485,13 @@ void SpObjects::tick_damage(const std::vector<Toucher>& touchers, const WeaponEv
             else if (pk.kind == 6) {
                 granted = true;
                 ++bond_pickups_;
+                texts_.push_back({0x0200004a, 180, 1});
             }
             else granted = weapons->give_weapon(t.slot, id, rounds) || weapons->give_ammo(t.slot, id, rounds);
             if (granted) {
                 if (pk.channel != 0) channels_.set(int(pk.channel), true);
-                if (pk.sound != 0 && pk.sound != 0xFFFF) sounds_.push_back({pk.sound, pp, false});
+                const auto sound = pk.kind == 6 ? 0x14cu : pk.sound;
+                if (sound != 0 && sound != 0xFFFF) sounds_.push_back({sound, pp, false});
                 pk.taken = true;
                 if (pk.kind == 6) pk.respawn = 0;
                 pk.respawn_in = float(pk.respawn);

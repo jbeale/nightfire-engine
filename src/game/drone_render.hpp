@@ -22,16 +22,6 @@ inline Mat4 drone_model_matrix(const Vec3& origin, float yaw) {
     return {c, 0, -s, 0,   0, 1, 0, 0,   s, 0, c, 0,   origin[0], origin[1], origin[2], 1};
 }
 
-inline Vec3 drone_render_origin(const Drone& d) {
-    // CharacterInstance removes root translation in both campaign and multiplayer.
-    Vec3 origin = d.pos;
-    // Grounded campaign movement consumes only horizontal root motion. Retain the authored
-    // descent of a falling body in the render pose without moving the collision capsule.
-    if (d.character && d.death_start_root_height && !d.mv.disabled)
-        origin[1] += std::min(0.0f, d.character->root_height() - *d.death_start_root_height);
-    return origin;
-}
-
 class DroneRenderer {
     struct Pose {
         const Drone* drone;
@@ -50,7 +40,7 @@ public:
 
     RenderPose interpolated_pose(const Drone& d, float alpha) const {
         alpha = std::clamp(alpha, 0.0f, 1.0f);
-        RenderPose pose{drone_render_origin(d), d.yaw};
+        RenderPose pose{d.pos, d.yaw};
         for (const Pose& p : previous_) {
             if (p.drone != &d) continue;
             pose.origin = p.origin + (pose.origin - p.origin) * alpha;
@@ -64,7 +54,7 @@ public:
     void capture_previous(const DroneSystem& sys) {
         previous_.clear();
         if (previous_.capacity() < sys.drones().size()) previous_.reserve(sys.drones().size());
-        for (const auto& dp : sys.drones()) previous_.push_back({dp.get(), drone_render_origin(*dp), dp->yaw});
+        for (const auto& dp : sys.drones()) previous_.push_back({dp.get(), dp->pos, dp->yaw});
     }
 
     void draw(const Camera& cam, float aspect, const DroneSystem& sys, float alpha = 1.0f,

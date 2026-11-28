@@ -48,12 +48,18 @@ Mat4 rot_y(float a) {
 
 }  // namespace
 
-Mission::Mission(DrivingLevel& level, const std::string& car)
+Mission::Mission(DrivingLevel& level, const std::string& car, bool alpine_gunner, AlpineCheckpoint checkpoint)
     : level_(level),
       data_(MissionData::load(level.carp())),
       road_(data_.route.empty() ? RoadNetwork::build(data_.road) : RoadNetwork::build_route(data_.route)),
       session_(level, car.empty() ? player_car_for(level.desc().viv, data_) : car),
       player_weapons_(WeaponSpec::load(level.vehicle_attributes(session_.car())), 150.0f) {
+    if (alpine_gunner && level.desc().viv == "MIS3" && session_.car() == "supersnow") {
+        alpine_ = std::make_unique<AlpineEscape>(session_, level.carp(), data_, level.render_extras(), checkpoint);
+        spawn_ai(true);
+        hud_.objective = alpine_->objective();
+        return;
+    }
     // Ambient traffic budget (world/*.atr MAX_TRAFFIC: 20 in Paris, 0 elsewhere).
     try {
         const Attributes w =
@@ -254,12 +260,19 @@ int Mission::car_model(const std::string& car) {
         SshFile shapes = parse_ssh(level_.read_file("data\\car\\model\\" + stem + ".ssh"));
         CarModel m;
         m.shapes = std::move(shapes);
-        auto parts = build_vehicle_parts(carp, elf);
+        const bool yard_sedan = alpine_ && car == "paris_hench";
+        auto parts = build_vehicle_parts(carp, elf, yard_sedan);
         int wheels = 0;
         for (VehiclePart& p : parts) {
             if (p.id == 0 && m.body.batches.empty()) {
                 m.body = p.mesh;
                 for (int a = 0; a < 3; ++a) m.half[a] = (p.mesh.max[a] - p.mesh.min[a]) / 2;
+            } else if (yard_sedan && p.id == 2) {
+                m.body.batches.insert(m.body.batches.end(), p.mesh.batches.begin(), p.mesh.batches.end());
+            } else if (yard_sedan && p.id == 3) {
+                // The bind table instantiates the same wheel on both sides.
+                for (auto& wheel : m.wheels) wheel = p.mesh;
+                wheels = 4;
             } else if (wheels < 4 && is_wheel_part(p.mesh)) {
                 m.wheels[std::size_t(wheels++)] = std::move(p.mesh);
             }
@@ -275,7 +288,7 @@ int Mission::car_model(const std::string& car) {
     }
 }
 
-void Mission::spawn_ai() {
+void Mission::spawn_ai(bool alpine_compound) {
     const PhysicsGlobals globals = PhysicsGlobals::load(
         Attributes::parse_flat(level_.read_text("data\\tuning\\physics\\rigid\\default.tun")),
         Attributes::parse_flat(level_.read_text("data\\tuning\\physics\\physical\\default.tun")));
@@ -284,6 +297,8 @@ void Mission::spawn_ai() {
         if (n >= 24) break;  // budget: AI roster beyond this stays dormant [INFERENCE]
         const std::string name = lower_of(s.car);
         if (name.empty() || name == lower_of(session_.car())) continue;
+        if (alpine_compound && (name != "paris_hench" || length(s.pos - session_.player_position()) > 60.0f))
+            continue;
         Attributes attrs;
         try {
             attrs = level_.vehicle_attributes(s.car);
@@ -291,7 +306,7 @@ void Mission::spawn_ai() {
             continue;
         }
         AiRole role = AiRole::Traffic;
-        if (contains(name, "static") || contains(name, "road_block") || contains(name, "helimine") ||
+        if (alpine_compound || contains(name, "static") || contains(name, "road_block") || contains(name, "helimine") ||
             contains(name, "fodbase"))
             role = AiRole::Parked;
         else if (contains(name, "heli") || contains(name, "copter") || contains(name, "plane") ||
@@ -403,6 +418,32 @@ void Mission::damage_player(float amount, int zone, const std::string& what) {
 
 void Mission::tick(const PadState& pad) {
     if (state_ != MissionState::Running) return;  // frozen end screen; nfdrive offers restart
+    if (alpine_) {
+        const bool had_armor = alpine_->armor();
+        const bool had_ravine_armor = alpine_->ravine_armor_collected();
+        const bool reached_checkpoint = alpine_->checkpoint();
+        const bool reached_end = alpine_->trail_end();
+        const bool gate_destroyed = alpine_->gate_destroyed();
+        const int previous_grenades = alpine_->grenade_ammo();
+        const float damage = alpine_->tick(pad, session_, sfx_);
+        if (!had_armor && alpine_->armor()) {
+            message("Picked up Armor", 2.0f);
+            sfx_.push_back({"SFX_pickuparmor", session_.player_position(), 0.8f});
+        }
+        if (!reached_checkpoint && alpine_->checkpoint()) message("Enemy snowmobiles incoming", 3.0f);
+        if (previous_grenades == 0 && alpine_->grenade_ammo() > 0) message("Picked up JL-7C ammo", 3.0f);
+        if (!gate_destroyed && alpine_->gate_destroyed()) message("Objective complete", 3.0f);
+        if (!had_ravine_armor && alpine_->ravine_armor_collected())
+            message("Picked up Armor", 2.0f);
+        if (!reached_end && alpine_->trail_end()) message("Lower forest checkpoint", 6.0f);
+        if (damage > 0) damage_player(damage, 0, "Enemy fire");
+        hud_.damage01 = 1.0f - player_weapons_.health() / player_weapons_.max_health();
+        hud_.objective = alpine_->objective();
+        hud_.time_s = float(++ticks_) * kDt;
+        hud_.speed_ms = session_.player_speed();
+        if (hud_.message_timer > 0) hud_.message_timer -= kDt;
+        return;
+    }
     fire_pad_.push(autodrive_ ? auto_gun() : pad);
     clock_ = float(ticks_) * kDt;
     tick_player(pad);

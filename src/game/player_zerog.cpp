@@ -78,6 +78,10 @@ void Player::update_zerog(const ActionInput& input, FrameTiming timing) {
         yaw_step_ = -input.actionf(kActTurn) * kZeroGTurnRate * rec;
         pitch_delta = -input.actionf(kActLookPitch) * kZeroGTurnRate * rec;
     }
+    const MouseLook mouse = input.mouse_look();
+    const float look_zoom = (body_flags & body::kZoomed) != 0 ? zoom : 1.0f;
+    yaw_step_ += mouse.yaw / look_zoom;
+    pitch_delta -= mouse.pitch / look_zoom;
 
     // Each thrust axis eases towards 0.1 * stick by 4% of the gap per FRAME_RATE_MUL, at most 0.05 * FRAME_RATE_MUL.
     const float limit = mul * 0.05f;

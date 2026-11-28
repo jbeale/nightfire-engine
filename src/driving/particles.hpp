@@ -33,6 +33,8 @@ public:
 
     // One 60 Hz tick. Reads the player vehicle, projectiles and damage from the mission.
     void tick(const DriveSession& session, const Mission& mission);
+    void burst_explosion(const Vec3& centre, float scale);
+    void burst_chalet_debris(const Vec3& center, const Vec3& direction, bool glass);
     std::vector<Sprite> sprites() const;
 
 private:

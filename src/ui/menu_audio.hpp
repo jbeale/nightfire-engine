@@ -29,10 +29,9 @@ inline std::uint32_t menu_sound_sfx(ui::MenuSound sound, unsigned enable_mask = 
     return 0;
 }
 
-// The menu ambience: the two loops the menu pages start when menu_movie is clear
-// (SFXStart(0x1D7) + SFXStart(0x470) in P_ATTRACT/P_INTRO/P_NFRESULTS/P_MPDEBRIEFING/...).
-// Play both once when the frontend opens.
-constexpr std::uint32_t kMenuAmbientA = 0x1D7, kMenuAmbientB = 0x470;
+// The two menu effects live in separate frontend banks (Sound_Ready).
+constexpr std::uint32_t kMenuNightfireTheme = 0x1D7, kMenuBondTheme = 0x470;
+constexpr std::uint32_t kMenuNightfireBank = 12, kMenuBondBank = 56;
 // P_CREDITS starts music track 0x27 (SFXStartMusic) and restores the music volume after.
 constexpr std::uint32_t kCreditsMusicTrack = 0x27;
 

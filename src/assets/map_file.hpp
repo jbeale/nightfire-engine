@@ -122,7 +122,6 @@ inline bool is_non_drawable_class(std::uint32_t cls) {
         case 0xE5:  // Cover corner node (Drone_CoverCornerNode)
         case 0xE6:  // Cover low node (Drone_CoverLowNode)
         case 0xE7:  // ThirdCam_Create: camera marker
-        case 0xE8:  // Trigger_LoadLevelCreate: level-change volume
         case 0xE9:  // Drone_AIPoint: AI marker
         case 0xEA:  // Trigger_TouchOnce: trigger volume
         case 0xEB:  // Trigger_Touch: trigger volume

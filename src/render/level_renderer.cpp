@@ -63,13 +63,14 @@ layout(location = 0) in vec3 a_pos;
 layout(location = 1) in vec2 a_uv;
 layout(location = 2) in vec4 a_rgba;
 uniform mat4 u_mvp;
+uniform vec3 u_tint;
 out vec2 v_uv;
 out vec3 v_color;
 out float v_alpha;
 out float v_depth;
 void main() {
     v_uv = a_uv;
-    v_color = a_rgba.rgb * (255.0 / 128.0);
+    v_color = a_rgba.rgb * (255.0 / 128.0) * u_tint;
     v_alpha = floor(a_rgba.a * 255.0 + 0.5);
     gl_Position = u_mvp * vec4(a_pos, 1.0);
     v_depth = gl_Position.w;
@@ -206,6 +207,7 @@ LevelRenderer::LevelRenderer(Level& level, const RenderOptions& initial) : optio
     if (const char* dir = std::getenv("NIGHTFIRE_TEXTURE_OVERRIDES"); dir && *dir) texture_override_dir_ = dir;
     program_ = compile_program(kVertexShader, kFragmentShader);
     u_mvp_ = glGetUniformLocation(program_, "u_mvp");
+    u_tint_ = glGetUniformLocation(program_, "u_tint");
     u_atest_ = glGetUniformLocation(program_, "u_atest");
     u_aref_ = glGetUniformLocation(program_, "u_aref");
     u_fog_color_ = glGetUniformLocation(program_, "u_fog_color");
@@ -336,6 +338,7 @@ void LevelRenderer::draw_items(const std::vector<Item>& items, const Camera& cam
         }
         Mat4 mvp = mul(vp, model);
         glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp.data());
+        glUniform3f(u_tint_, item.tint[0], item.tint[1], item.tint[2]);
         glBindVertexArray(item.mesh->vao);
         for (const Batch& b : item.mesh->batches) {
             apply_material(b.material);
@@ -374,6 +377,7 @@ void LevelRenderer::draw(const Camera& cam, float aspect, bool collision_wirefra
     apply_material(Material{});
     set_fog(false);
     if (collision_wireframe) {
+        glUniform3f(u_tint_, 1, 1, 1);
         glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
         glEnable(GL_POLYGON_OFFSET_LINE);
         glPolygonOffset(-1.0f, -1.0f);
@@ -404,9 +408,13 @@ void LevelRenderer::draw_objects(const Camera& cam, float aspect, const std::vec
     placements.reserve(objects.size());
     for (const ObjectDraw& o : objects) placements.push_back({o.chunk, o.model, 0, o.transform});
     std::vector<Item> items;
-    for (const Placement& p : placements) {
+    for (std::size_t i = 0; i < placements.size(); ++i) {
+        const Placement& p = placements[i];
         const Mesh& mesh = gpu_mesh(p.chunk, p.model);
-        if (!mesh.batches.empty()) items.push_back({&p, &mesh, {p.transform[12], p.transform[13], p.transform[14]}});
+        if (mesh.batches.empty()) continue;
+        Item item{&p, &mesh, {p.transform[12], p.transform[13], p.transform[14]}};
+        item.tint = objects[i].tint;
+        items.push_back(item);
     }
     std::sort(items.begin(), items.end(), [&](const Item& a, const Item& b) {
         return length(a.center - cam.eye) > length(b.center - cam.eye);

@@ -72,6 +72,13 @@ add_library(nf_assets STATIC
 target_include_directories(nf_assets PUBLIC src)
 target_compile_options(nf_assets PRIVATE ${NF_WARNINGS})
 
+if(APPLE)
+  add_executable(nfbake-conduit EXCLUDE_FROM_ALL src/tools/nfbake_conduit.cpp)
+  target_link_libraries(nfbake-conduit PRIVATE nf_assets "-framework CoreText" "-framework CoreGraphics"
+    "-framework CoreFoundation")
+  target_compile_options(nfbake-conduit PRIVATE ${NF_WARNINGS})
+endif()
+
 add_executable(nfdump src/tools/nfdump.cpp src/tools/nfdump_sounds.cpp src/tools/nfdump_chars.cpp src/tools/nfdump_ui.cpp
   src/tools/nfdump_ssh.cpp src/tools/nfdump_driving.cpp src/tools/nfdump_hud.cpp src/tools/nfdump_mp.cpp src/tools/nfdump_game.cpp src/tools/nfdump_weapons.cpp src/tools/nfdump_nav.cpp src/tools/nfdump_arena.cpp src/tools/nfdump_sp.cpp src/tools/nfdump_bots.cpp src/tools/nfdump_script.cpp src/tools/nfdump_diff.cpp
   src/ui/mp_setup.cpp)  # mp_setup is UI-independent (no GL), so nfdump compiles it directly instead of linking nf_ui
@@ -97,11 +104,13 @@ target_compile_options(nfview PRIVATE ${NF_WARNINGS})
 file(GLOB NF_DRIVING_SOURCES CONFIGURE_DEPENDS src/driving/*.cpp)
 list(FILTER NF_DRIVING_SOURCES EXCLUDE REGEX "scene_renderer\\.cpp$")
 list(FILTER NF_DRIVING_SOURCES EXCLUDE REGEX "particle_render\\.cpp$")
+list(FILTER NF_DRIVING_SOURCES EXCLUDE REGEX "snow_track_render\\.cpp$")
 add_library(nf_driving_sim STATIC ${NF_DRIVING_SOURCES})
 target_include_directories(nf_driving_sim PUBLIC src)
 target_link_libraries(nf_driving_sim PUBLIC nf_assets)
 target_compile_options(nf_driving_sim PRIVATE ${NF_WARNINGS})
-add_library(nf_driving STATIC src/driving/scene_renderer.cpp src/driving/particle_render.cpp)
+add_library(nf_driving STATIC src/driving/scene_renderer.cpp src/driving/particle_render.cpp
+    src/driving/snow_track_render.cpp)
 target_link_libraries(nf_driving PUBLIC nf_driving_sim nf_render)
 target_compile_options(nf_driving PRIVATE ${NF_WARNINGS})
 

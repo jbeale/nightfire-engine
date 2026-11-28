@@ -65,6 +65,9 @@ public:
 
     // Car meshes in car space (origin at the body box centre) and the shape library of the car.
     const SceneMesh& body_mesh() const { return body_; }
+    const SceneMesh& gunner_body_mesh() const { return gunner_body_; }
+    const SceneMesh& gun_mount_mesh() const { return gun_mount_; }
+    const SceneMesh& mounted_gun_mesh() const { return mounted_gun_; }
     const std::array<SceneMesh, 4>& wheel_meshes() const { return wheels_; }
     const SshFile& car_shapes() const { return car_shapes_; }
 
@@ -95,6 +98,7 @@ private:
     SshFile car_shapes_;
     Vec3 half_{};                    // half extents of the body box
     Vec3 body_center_{};             // model-space centre of the body box
+    SceneMesh mounted_gun_, gun_mount_, gunner_body_;
     float wheel_radius_ = 0.35f;
     std::size_t ticks_ = 0;
 };

@@ -1,11 +1,37 @@
 #include "assets/ui_assets.hpp"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 
 #include "assets/bin_archive.hpp"
 
 namespace nf {
 namespace {
+
+void load_local_font_bakes(UiAssets& ui, const std::filesystem::path& gamedir) {
+    const char* override_dir = std::getenv("NF_FONT_ATLAS_DIR");
+    if (override_dir && !*override_dir) return;
+    const std::filesystem::path dir = override_dir ? std::filesystem::path(override_dir) : gamedir / "font-atlases";
+    for (auto [number, filename] : {std::pair{2, "conduit-2.alpha"}, std::pair{3, "conduit-3.alpha"}}) {
+        Font& font = ui.fonts.fonts[std::size_t(number - 1)];
+        const Texture* stock = ui.sprites.find(font.texture_hash);
+        const auto path = dir / filename;
+        if (!stock || !std::filesystem::is_regular_file(path)) continue;
+        Texture atlas{stock->flags, stock->width * kFontBakeScale, stock->height * kFontBakeScale, 1, 1, {}};
+        auto coverage = read_file(path);
+        if (coverage.size() != std::size_t(atlas.width) * atlas.height) {
+            std::fprintf(stderr, "Ignoring font bake with incorrect dimensions: %s\n", path.string().c_str());
+            continue;
+        }
+        atlas.rgba.reserve(coverage.size());
+        for (std::uint32_t alpha : coverage) atlas.rgba.push_back(0x00FFFFFFu | (alpha << 24));
+        // Level chunks can register the original texture again. Keep the bake's hash distinct.
+        font.texture_hash = 0x7E000000u + std::uint32_t(number);
+        font.raster_scale = kFontBakeScale;
+        ui.sprites.add(font.texture_hash, std::move(atlas));
+    }
+}
 
 // psiDecompressWoman composites a sliding window of the source texture through
 // the mask in the level's Woman entry, then uploads it as the pause sprite.
@@ -74,6 +100,7 @@ UiAssets load_ui_assets(const std::filesystem::path& gamedir, GameFiles& files, 
     if (!front) throw FormatError("FILES.BIN has no front end bin " + std::string(kFrontEndBin));
     auto bin = files.read(*front);
     add_level_sprites(ui.sprites, Bytes(bin));
+    load_local_font_bakes(ui, gamedir);
     return ui;
 }
 

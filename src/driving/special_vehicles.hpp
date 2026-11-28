@@ -86,9 +86,11 @@ private:
 // cannot tunnel through mountains. Tuned constants [INFERENCE].
 class Snowmobile {
 public:
+    static constexpr float kRideHeight = 0.35f;
     Snowmobile(const VehicleParams& params, float top_speed);
 
     void reset(const Vec3& pos, float yaw);
+    void set_scripted_pose(const Vec3& pos, float yaw, float speed, const Vec3& up = {0, 1, 0});
     void step(const DriveInput& in, const TrackCollision& collision);
 
     Vec3 position() const { return pos_; }
@@ -105,7 +107,9 @@ private:
     float boost_ = 0;
     float top_speed_ = 40.0f, accel_ = 3.0f;
     Vec3 pos_{};
+    Vec3 up_{0, 1, 0};
     float yaw_ = 0, speed_ = 0, throttle_ = 0;
+    float yaw_rate_ = 0;
 };
 
 }  // namespace nf::driving

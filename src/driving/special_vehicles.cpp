@@ -9,7 +9,7 @@ namespace {
 constexpr float kDt = 1.0f / 60.0f;
 
 Mat4 mat_from_axes(const Vec3& x, const Vec3& y, const Vec3& z, const Vec3& t) {
-    return {x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0, t[0], t[1], t[2], 1};
+    return {x[0], x[1], x[2], 0, y[0], y[1], y[2], 0, z[0], z[1], z[2], 0, t[0], t[1], t[2], 1};
 }
 
 float floor_at(const TrackCollision& c, const Vec3& p, float fallback) {
@@ -151,11 +151,22 @@ Snowmobile::Snowmobile(const VehicleParams& params, float top_speed)
 
 void Snowmobile::reset(const Vec3& pos, float yaw) {
     pos_ = pos;
+    up_ = {0, 1, 0};
     yaw_ = yaw;
+    yaw_rate_ = 0;
     speed_ = throttle_ = 0;
 }
 
 Vec3 Snowmobile::forward() const { return {std::sin(yaw_), 0, std::cos(yaw_)}; }
+
+void Snowmobile::set_scripted_pose(const Vec3& pos, float yaw, float speed, const Vec3& up) {
+    pos_ = pos;
+    up_ = up;
+    yaw_ = yaw;
+    yaw_rate_ = 0;
+    speed_ = speed;
+    throttle_ = std::min(speed / top_speed_, 1.0f);
+}
 
 void Snowmobile::step(const DriveInput& in, const TrackCollision& collision) {
     boost_ = std::max(boost_ - kDt, 0.0f);
@@ -169,7 +180,9 @@ void Snowmobile::step(const DriveInput& in, const TrackCollision& collision) {
     }
     // Ski steering: agile at crawl, lazy at speed; slides wide when steered hard and fast.
     const float grip = std::min(1.0f, 12.0f / (4.0f + speed_));
-    yaw_ += in.steer * (0.5f + 1.6f * grip) * kDt;
+    const float target_rate = in.steer * (0.5f + 1.6f * grip);
+    yaw_rate_ += (target_rate - yaw_rate_) * (kDt / 0.15f);
+    yaw_ += yaw_rate_ * kDt;
     const Vec3 step = forward() * (speed_ * kDt);
     // Wall probe so the sled cannot tunnel through mountainsides.
     SegmentHit hit;
@@ -181,7 +194,7 @@ void Snowmobile::step(const DriveInput& in, const TrackCollision& collision) {
     }
     // Ground following (0.35 m ride height); falls back to the current height over voids.
     GroundHit g;
-    if (collision.ground_below({pos_[0], pos_[1] + 3.0f, pos_[2]}, g)) pos_[1] = g.point[1] + 0.35f;
+    if (collision.ground_below({pos_[0], pos_[1] + 3.0f, pos_[2]}, g)) pos_[1] = g.point[1] + kRideHeight;
 }
 
 float Snowmobile::rpm() const { return 900.0f + std::abs(throttle_) * 4500.0f + speed_ * 20.0f; }
@@ -191,17 +204,16 @@ CameraTarget Snowmobile::camera_target() const {
     t.position = pos_;
     t.forward = forward();
     t.right = {std::cos(yaw_), 0, -std::sin(yaw_)};
-    t.up = {0, 1, 0};
+    t.up = up_;
     t.velocity = forward() * speed_;
     t.speed = std::abs(speed_);
     return t;
 }
 
 Mat4 Snowmobile::model_matrix() const {
-    const Vec3 f = forward();
-    const Vec3 r = {std::cos(yaw_), 0, -std::sin(yaw_)};
-    const Vec3 u = cross(f, r);
-    return mat_from_axes(r, u, f, pos_);
+    const Vec3 side = cross(up_, forward());
+    const Vec3 right = side * (1.0f / length(side));
+    return mat_from_axes(right, up_, cross(right, up_), pos_);
 }
 
 }  // namespace nf::driving

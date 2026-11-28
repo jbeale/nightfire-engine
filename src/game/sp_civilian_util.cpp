@@ -100,28 +100,69 @@ bool cover_usable(Drone& d, std::size_t index) {
     if (n.require_on != 0 && !sp.channels.on(n.require_on)) return false;
     if (n.require_off != 0 && sp.channels.on(n.require_off)) return false;
     for (Drone* o : sp_of(d).sp_drones()) {
-        if (o != &d && sx(*o).cover_node == int(index)) return false;
+        if (o == &d || !o->alive() || o->hidden) continue;
+        if (sx(*o).cover_node == int(index) ||
+            (sx(d).cover_node != int(index) && length(o->pos - n.pos) < 1.5f))
+            return false;
     }
     return true;
 }
 
 namespace {
 
-int nearby_cover(Drone& d) {
+int cover_side(const Drone& d, const CoverNodeDef& node, const Vec3& opponent) {
+    const Vec3 toward_opponent = opponent - node.pos;
+    const float distance = length(toward_opponent);
+    if (distance < std::max(4.0f, d.min_cover_dist) ||
+        (d.has_beh(beh::kCoverLimit) && distance > 1.5f * d.max_combat_dist)) return 0;
+    const float angle = angle_diff(node.yaw, heading_of(toward_opponent[0], toward_opponent[2]));
+    constexpr float kFiveDegrees = kPi / 36.0f;
+    if (node.type == CoverNodeDef::Type::Low) {
+        const float width = d.sys->config().level_id == 0x700000d ? 4.0f * kPi / 9.0f : kPi / 4.0f;
+        return d.has_beh(0x0f) && std::fabs(angle) <= width ? 3 : 0;
+    }
+    const float outer = node.max_angle + kFiveDegrees;
+    const float inner = node.max_angle * 0.66f;
+    if ((node.flags & 0x100) && angle > kPi / 2.0f - inner && angle < kPi / 2.0f + outer) return 1;
+    if ((node.flags & 0x80) && (angle > kPi - outer || angle < inner - kPi)) return 2;
+    return 0;
+}
+
+struct CoverGoal {
+    int node = -1;
+    Vec3 pos{};
+};
+
+CoverGoal nearby_cover(Drone& d) {
     const auto& nodes = sp_of(d).level().cover_nodes;
-    const Vec3 feet = d.feet();
-    const Vec3 opponent = target_pos(*d.sys, d.opponent);
-    // Cheap distance bounds before trying to route. Both the approach and the space from the
-    // opponent matter; a node beside Bond or beyond him often stalls the close-quarters exchange.
-    float best_distance = std::min(d.opp_dist, 25.0f);
-    int best = -1;
+    const Vec3 feet = d.nav_pos();
+    const Vec3 opponent = d.opp_last_known;
+    float best_distance = d.opp_dist;
+    CoverGoal best;
     for (std::size_t i = 0; i < nodes.size(); ++i) {
-        const Vec3 point = nodes[i].pos;
-        const Vec3 approach = point - feet;
-        const float distance = length(approach);
-        if (distance > best_distance || length(point - opponent) < d.min_cover_dist || !cover_usable(d, i)) continue;
+        const CoverNodeDef& node = nodes[i];
+        if (!cover_usable(d, i)) continue;
+        const int side = cover_side(d, node, opponent);
+        if (side == 0) continue;
+        // NDrone2_GetPosForCornerCover approaches the protected side of the authored marker.
+        const float forward = side == 1 ? -0.1f * node.range_a : side == 2 ? 0.7f : -1.1f;
+        const float right = side == 1 ? -0.7f : side == 2 ? 0.1f * node.range_b : 0.0f;
+        const float s = std::sin(node.yaw), c = std::cos(node.yaw);
+        const Vec3 point = node.pos + Vec3{forward * s + right * c, 0.0f, forward * c - right * s};
+        float distance = length(point - feet);
+        if (distance >= best_distance) continue;
+        if (d.nav) {
+            NavAgent probe(d.nav->network());
+            probe.set_path(d.nav->path());
+            probe.set_goal_position(point, 0.5f);
+            const RouteStatus status = probe.calc_route_to_goal(feet);
+            if (status != RouteStatus::Arrived && status != RouteStatus::Straight &&
+                status != RouteStatus::Following) continue;
+            distance = probe.route_distance(feet);
+        }
+        if (distance >= best_distance) continue;
         best_distance = distance;
-        best = int(i);
+        best = {int(i), point};
     }
     return best;
 }
@@ -134,17 +175,17 @@ bool cover_available(Drone& d) {
     if (!d.has_beh(beh::kFindCover) || !d.opponent.valid()) return false;
     if (d.flags & flag::kCoverClaimed) return true;
     if ((d.sight_flags & sight::kSeen) && d.opp_dist < 4.0f) return false;
-    return nearby_cover(d) >= 0;
+    return nearby_cover(d).node >= 0;
 }
 
 bool find_cover(Drone& d) {
     SpExt& e = sx(d);
-    const SpLevel& level = sp_of(d).level();
-    const int best = (d.flags & flag::kCoverClaimed) && e.cover_node >= 0 ? e.cover_node : nearby_cover(d);
-    if (best < 0) return false;
-    e.cover_node = best;
+    if ((d.flags & flag::kCoverClaimed) && e.cover_node >= 0) return true;
+    const CoverGoal best = nearby_cover(d);
+    if (best.node < 0) return false;
+    e.cover_node = best.node;
     d.flags |= flag::kCoverClaimed;
-    set_ai_goal(d, level.cover_nodes[std::size_t(best)].pos, 1.0f);
+    set_ai_goal(d, best.pos, 0.5f);
     return true;
 }
 

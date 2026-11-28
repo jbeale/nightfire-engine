@@ -40,16 +40,6 @@ namespace glwrap = nf::gl;
 
 namespace {
 
-Mat4 look_at(const Vec3& eye, const Vec3& target, const Vec3& up) {
-    Vec3 f = target - eye;
-    f = f * (1.0f / length(f));
-    Vec3 r = cross(f, up);
-    const float rl = length(r);
-    r = rl > 1e-6f ? r * (1.0f / rl) : Vec3{1, 0, 0};
-    const Vec3 u = cross(r, f);
-    return {r[0], u[0], -f[0], 0, r[1], u[1], -f[1], 0, r[2], u[2], -f[2], 0, -dot(r, eye), -dot(u, eye), dot(f, eye), 1};
-}
-
 bool parse_vec3(const char* s, Vec3& out) {
     for (int i = 0; i < 3; ++i) {
         char* end;
@@ -369,6 +359,13 @@ int run(int argc, char** argv) {
         }
     };
     Run run{level, renderer, o.car};
+    const bool alpine_lighting = desc->viv == "MIS3";
+    SceneRenderer::Handle sky_handle{}, snow_underlay{};
+    if (alpine_lighting) {
+        renderer.set_key_light(level.key_light_direction(), level.key_light_colour());
+        sky_handle = renderer.upload(level.render_extras().sky);
+        snow_underlay = renderer.upload(build_snow_underlay(run.mission.session().collision(), level.track()));
+    }
     std::printf("%.*s: %zu track instances (%zu unresolved), %zu batches, %zu AI, %zu pickups\n",
                 int(desc->name.size()), desc->name.data(), track.instances, track.unresolved,
                 track.batches.size(), run.mission.ai().size(), run.mission.pickups().size());
@@ -448,52 +445,58 @@ int run(int argc, char** argv) {
         Vec3 eye{0, 0, 0}, view_target{0, 0, 0}, view_up{0, 1, 0};
         if (!o.free_camera) {
             const CameraPose& c = session.camera_pose();
-            vp = mul(perspective(c.fovy, float(w) / float(h), c.znear, c.zfar), look_at(c.eye, c.target, c.up));
+            vp = mul(perspective(c.fovy, float(w) / float(h), c.znear, c.zfar), drive_view_matrix(c.eye, c.target, c.up));
             eye = c.eye;
             view_target = c.target;
             view_up = c.up;
         } else {
-            vp = mul(perspective(0.9f, float(w) / float(h), 0.5f, 4000.0f), look_at(o.eye, o.target, {0, 1, 0}));
+            vp = mul(perspective(0.9f, float(w) / float(h), 0.5f, 4000.0f), drive_view_matrix(o.eye, o.target, {0, 1, 0}));
             eye = o.eye;
             view_target = o.target;
         }
+        if (alpine_lighting) {
+            renderer.set_view_lights(eye, level.render_extras().lamps, session.player_position(), session.player_forward());
+            renderer.draw_sky(sky_handle, vp, eye);
+            renderer.draw(snow_underlay, vp, identity(), true, 0.0f, o.free_camera ? 0.5f : session.camera_pose().znear);
+        }
         renderer.draw(track_handle, vp);
         if (!o.free_camera) {
-            renderer.draw(run.body, mul(vp, session.player_body_matrix()));
+            renderer.draw(run.body, vp, session.player_body_matrix());
             if (session.has_wheels())
-                for (int i = 0; i < 4; ++i) renderer.draw(run.wheels[i], mul(vp, session.wheel_matrix(i)));
+                for (int i = 0; i < 4; ++i) renderer.draw(run.wheels[i], vp, session.wheel_matrix(i));
             for (std::size_t i = 0; i < mission.ai().size(); ++i) {
                 const AiCar& a = mission.ai()[i];
                 if (a.model < 0) continue;
                 if (a.driver->role() == AiRole::Heli) {
-                    renderer.draw(run.ai[i].body, mul(vp, mission.heli_matrix(*a.driver)));
+                    renderer.draw(run.ai[i].body, vp, mission.heli_matrix(*a.driver));
                     continue;
                 }
-                renderer.draw(run.ai[i].body, mul(vp, mission.ai_body_matrix(i)));
+                renderer.draw(run.ai[i].body, vp, mission.ai_body_matrix(i));
                 if (mission.models()[std::size_t(a.model)].has_wheels)
                     for (int k = 0; k < 4; ++k)
-                        renderer.draw(run.ai[i].wheels[k], mul(vp, mission.ai_wheel_matrix(i, k)));
+                        renderer.draw(run.ai[i].wheels[k], vp, mission.ai_wheel_matrix(i, k));
             }
             for (const Projectile& p : mission.projectiles()) {
                 Mat4 m = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, p.pos[0], p.pos[1], p.pos[2], 1};
-                renderer.draw(shot_handle, mul(vp, m));
+                renderer.draw(shot_handle, vp, m, false);
             }
             for (const Pickup& p : mission.pickups()) {
                 if (p.respawn > 0) continue;
                 Mat4 m = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, p.pos[0], p.pos[1], p.pos[2], 1};
-                renderer.draw(pickup_handle, mul(vp, m));
+                renderer.draw(pickup_handle, vp, m);
             }
         }
         Vec3 fwd = view_target - eye;
         const float fwd_len = length(fwd);
         if (fwd_len > 1e-6f) {
             fwd = fwd * (1.0f / fwd_len);
-            Vec3 right = cross(fwd, view_up);
+            Vec3 right = cross(view_up, fwd);
             if (length(right) > 1e-6f) {
                 right = right * (1.0f / length(right));
-                run.particle_renderer.draw(run.particles, vp, eye, right, cross(right, fwd));
+                run.particle_renderer.draw(run.particles, vp, eye, right, cross(fwd, right));
             }
         }
+        renderer.draw_lamp_glows(vp, eye, view_target, view_up);
         // HUD overlay (DrivingHud feed).
         const DrivingHud& hud = mission.hud();
         const Vec3 white{1, 1, 1}, amber{1, 0.8f, 0.2f}, red{1, 0.25f, 0.2f}, green{0.4f, 1, 0.5f};

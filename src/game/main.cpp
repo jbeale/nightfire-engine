@@ -39,6 +39,7 @@
 #include "game/arena_view.hpp"   // kViewFovY (Camera_CalcViewAngles 1.0471976)
 #include "game/drone_cli.hpp"
 #include "game/drone_render.hpp"
+#include "game/local_pad.hpp"
 #include "game/nfgame_effects.hpp"
 #include "game/nfgame_weapon_view.hpp"
 #include "game/weapon_script.hpp"
@@ -147,7 +148,10 @@ public:
             pad_ = nullptr;
         }
     }
-    void set_captured(bool c) { captured_ = c; }
+    void set_captured(bool c) {
+        captured_ = c;
+        if (!c) mouse_dx_ = mouse_dy_ = 0;
+    }
     void open_gamepads() {
         int count = 0;
         if (SDL_JoystickID* ids = SDL_GetGamepads(&count)) {
@@ -157,7 +161,7 @@ public:
     }
 
     // Samples the devices for one tick; sticks are returned in game form (after the dead zone).
-    PadState sample() {
+    PadState sample(bool invert_mouse_y) {
         PadState raw;
         const bool* k = SDL_GetKeyboardState(nullptr);
         auto axis = [](bool neg, bool pos) { return std::uint8_t(neg == pos ? 0x80 : neg ? 0x00 : 0xFF); };
@@ -180,11 +184,7 @@ public:
         }
         if (pad_) apply_gamepad(raw);
         PadState out = compensate_sticks(raw);
-        // Mouse look bypasses the dead zone: pixels per tick map straight onto stick deflection.
-        if (mouse_dx_ != 0 || mouse_dy_ != 0) {
-            out.lx = stick_from_delta(mouse_dx_, out.lx);
-            out.ry = stick_from_delta(mouse_dy_, out.ry);
-        }
+        out.mouse = mouse_look_from_motion(mouse_dx_, invert_mouse_y ? -mouse_dy_ : mouse_dy_);
         if (captured_) {
             const Uint32 mb = SDL_GetMouseState(nullptr, nullptr);
             if (mb & SDL_BUTTON_LMASK) out.buttons |= kPadR1;
@@ -195,12 +195,6 @@ public:
     }
 
 private:
-    static std::uint8_t stick_from_delta(float delta, std::uint8_t current) {
-        constexpr float kUnitsPerPixel = 4.0f;
-        const int v = int(std::lround(float(current) + delta * kUnitsPerPixel));
-        return std::uint8_t(std::clamp(v, 0, 255));
-    }
-
     void apply_gamepad(PadState& raw) {
         auto stick = [this](SDL_GamepadAxis a) { return std::uint8_t(std::clamp(int(std::lround(SDL_GetGamepadAxis(pad_, a) / 32767.0 * 127.0)) + 0x80, 0, 255)); };
         auto pressed = [this](SDL_GamepadButton b) { return SDL_GetGamepadButton(pad_, b); };
@@ -588,11 +582,14 @@ int run(int argc, char** argv) {
                 const Placement& pl = level.placements()[d.placement];
                 LevelRenderer::ObjectDraw o;
                 o.chunk = pl.chunk;
-                o.model = pl.model;
+                o.model = d.model == SIZE_MAX ? pl.model : d.model;
+                o.tint = d.tint;
                 for (int k = 0; k < 16; ++k) o.transform[k] = d.transform[std::size_t(k)];
                 objs.push_back(o);
             }
         }
+        const auto rockets = effects.projectile_draws(weapons.projectiles(), interpolation);
+        objs.insert(objs.end(), rockets.begin(), rockets.end());
         if (!objs.empty()) renderer.draw_objects(wc, aspect, objs);
         if (drone_renderer) drone_renderer->draw(wc, aspect, *drone_cli.system(), interpolation);
         effects.draw(wc, aspect, chars, weapons.projectiles(), interpolation);
@@ -667,7 +664,7 @@ int run(int argc, char** argv) {
         while (accumulator >= kStep) {
             prev = view_of(player);
             PadInputs pads{};
-            pads[0] = human.sample();
+            pads[0] = human.sample(world.settings(0).invert_look);
             // Cross/use goes through Movement's Player_Activate -> SpObjects::activate_at hook now.
             if (drone_renderer && drone_cli.system()) drone_renderer->capture_previous(*drone_cli.system());
             previous_viewmodel = weapons.viewmodel(0);

@@ -72,12 +72,14 @@ RoomMap::RoomMap(const Level& level, const CollisionWorld& world) {
     std::unordered_map<std::size_t, std::size_t> solid_of;   // placement -> CollisionWorld::solid index
     for (std::size_t i = 0; i < world.solid_count(); ++i) solid_of[world.solid(i).placement] = i;
 
-    // The cels this cares about, in file order. A water plane keeps the sphere its model carries (cel+0x80/+0x8C).
-    struct Surface {
+    // Room children use their authored bounding sphere (cel+0x80/+0x8C) to find an owner.
+    struct RoomChild {
+        std::size_t placement;
         Vec3 centre;
-        float radius, level;
+        float radius;
+        std::optional<float> water_level;
     };
-    std::vector<Surface> surfaces;
+    std::vector<RoomChild> children;
     std::vector<float> radius;                        // per room: cel+0x8C
     std::unordered_map<std::size_t, std::size_t> room_of_model;   // map-chunk model -> room (first in file order)
     const auto& placements = level.placements();
@@ -85,13 +87,15 @@ RoomMap::RoomMap(const Level& level, const CollisionWorld& world) {
         const Placement& p = placements[pi];
         const StaticInstance& s = level.chunks()[map_chunk].chunk.statics[p.instance];
         const std::uint32_t cls = s.flags & 0xFFFF;
-        if (cls != celflag::kRoom && cls != celflag::kWaterRoom && cls != celflag::kWaterSurface) continue;
+        const bool child = cls >= celflag::kWaterSurface && cls <= 0x8019;
+        if (cls != celflag::kRoom && cls != celflag::kWaterRoom && !child) continue;
         const MapChunk& chunk = level.chunks()[p.chunk].chunk;
         const Model& model = chunk.models.at(p.model);
         const ModelBox box = model_box(chunk, p.model);
-        if (cls == celflag::kWaterSurface) {
+        if (child) {
             const Vec3 centre = transform_point(p.transform, {model.params[0], model.params[1], model.params[2]});
-            surfaces.push_back({centre, model.params[3], box.min[1]});   // cel+0x44: the lowest y of the box
+            const std::optional<float> water = cls == celflag::kWaterSurface ? std::optional{box.min[1]} : std::nullopt;
+            children.push_back({pi, centre, model.params[3], water});
             continue;
         }
         Room r;
@@ -106,15 +110,13 @@ RoomMap::RoomMap(const Level& level, const CollisionWorld& world) {
         rooms_.push_back(std::move(r));
     }
 
-    // build_link_objects_to_rooms: the water plane belongs to the room that contains its centre, is at least as big
-    // as the plane and has geometry closest to it (Collide_SphereIntersect, radius 4001, against the room's mesh;
-    // the nearest triangle distance stands in for the hit distance) - a later plane overrides an earlier one.
-    // The original walks the cel list back to front.
-    for (auto it = surfaces.rbegin(); it != surfaces.rend(); ++it) {
-        int best = kNone;
+    // build_link_objects_to_rooms joins classes 0x8017..0x8019 to the nearest room mesh
+    // whose box contains the child's centre and whose sphere is large enough.
+    for (auto it = children.rbegin(); it != children.rend(); ++it) {
+        Room* best = nullptr;
         float best_dist = 4000.0f;
         for (std::size_t i = rooms_.size(); i-- > 0;) {
-            const Room& r = rooms_[i];
+            Room& r = rooms_[i];
             if (it->radius > radius[i] || !contains(int(i), it->centre)) continue;
             const auto solid = solid_of.find(r.placement);
             if (solid == solid_of.end()) continue;
@@ -127,11 +129,14 @@ RoomMap::RoomMap(const Level& level, const CollisionWorld& world) {
                 nearest = std::min(nearest, length(c - it->centre));
             }
             if (nearest < best_dist) {
-                best = int(i);
+                best = &r;
                 best_dist = nearest;
             }
         }
-        if (best != kNone) rooms_[std::size_t(best)].water = it->level;
+        if (best) {
+            best->linked_geometry.push_back(it->placement);
+            if (it->water_level) best->water = *it->water_level;
+        }
     }
 
     // parsemap_block_portal_data: a portal joins the rooms built from two models; each side gets one that leads to
@@ -170,7 +175,7 @@ int RoomMap::find(const Vec3& p, const CollisionWorld& world) const {
     // Several rooms overlap the point: the one whose geometry is nearest straight above or below wins. Both rays
     // only ever get shorter, so a later room must beat every hit so far.
     const auto nearest_hit = [&](const Vec3& to, std::size_t placement) -> std::optional<float> {
-        for (const CollisionHit& h : world.ray_hits(p, to, 0))
+        for (const CollisionHit& h : world.ray_hits(p, to, 0, 0, false))
             if (h.placement == placement) return h.dist;
         return std::nullopt;
     };
@@ -212,6 +217,128 @@ int RoomMap::track(int room, const Vec3& from, const Vec3& to, const CollisionWo
     for (const Portal& portal : rooms_[std::size_t(room)].portals)
         if (crosses_portal(portal, from, to)) return portal.dest;
     return contains(room, to) ? room : find(to, world);
+}
+
+void RoomMap::enable_portal_geometry(std::string_view room) {
+    const auto found = std::find_if(rooms_.begin(), rooms_.end(), [&](const Room& r) { return r.name == room; });
+    if (found != rooms_.end()) found->portal_geometry = true;
+}
+
+void RoomMap::hide_room_overlap(std::string_view room, std::string_view overlap) {
+    const auto source = std::find_if(rooms_.begin(), rooms_.end(), [&](const Room& r) { return r.name == room; });
+    const auto outside = std::find_if(rooms_.begin(), rooms_.end(), [&](const Room& r) { return r.name == overlap; });
+    if (source != rooms_.end() && outside != rooms_.end())
+        source->hidden_overlap = std::size_t(outside - rooms_.begin());
+}
+
+int RoomMap::portal_geometry_room(const CollisionWorld& world, const Vec3& p, int tracked_room) const {
+    // A fresh bounds search near a doorway can choose the overlapping exterior shell.
+    if (tracked_room >= 0 && std::size_t(tracked_room) < rooms_.size() &&
+        rooms_[tracked_room].portal_geometry && contains(tracked_room, p))
+        return tracked_room;
+
+    bool candidate = false;
+    for (std::size_t i = 0; i < rooms_.size(); ++i) {
+        if (rooms_[i].portal_geometry && contains(int(i), p)) {
+            candidate = true;
+            break;
+        }
+    }
+    if (!candidate) return kNone;
+    const int room = find(p, world);
+    return room != kNone && rooms_[room].portal_geometry ? room : kNone;
+}
+
+std::vector<std::size_t> RoomMap::omitted_placements(const std::vector<bool>& reached) const {
+    std::vector<std::size_t> omitted;
+    for (std::size_t i = 0; i < rooms_.size(); ++i) {
+        if (reached[i]) continue;
+        omitted.push_back(rooms_[i].placement);
+        const auto& linked = rooms_[i].linked_geometry;
+        omitted.insert(omitted.end(), linked.begin(), linked.end());
+    }
+    std::sort(omitted.begin(), omitted.end());  // CollisionWorld tests membership for each candidate
+    return omitted;
+}
+
+std::vector<std::size_t> RoomMap::blocked_geometry(const CollisionWorld& world, const Vec3& from,
+                                                  const Vec3& to, float radius, int tracked_room) const {
+    const int start = portal_geometry_room(world, from, tracked_room);
+    if (start == kNone) return {};
+    Vec3 lo{}, hi{};
+    for (int i = 0; i < 3; ++i) {
+        lo[i] = std::min(from[i], to[i]) - radius;
+        hi[i] = std::max(from[i], to[i]) + radius;
+    }
+    std::vector<bool> reached(rooms_.size());
+    reached[start] = true;
+    std::vector<int> pending{start};
+    for (std::size_t i = 0; i < pending.size(); ++i) {
+        for (const Portal& portal : rooms_[pending[i]].portals) {
+            if (reached[portal.dest]) continue;
+            const bool crosses = radius > 0 ? boxes_overlap(lo, hi, portal.lo, portal.hi)
+                                            : crosses_portal(portal, from, to);
+            if (!crosses) continue;
+            reached[portal.dest] = true;
+            pending.push_back(portal.dest);
+        }
+    }
+    return omitted_placements(reached);
+}
+
+std::vector<std::size_t> RoomMap::hidden_geometry(const CollisionWorld& world, const Vec3& eye,
+                                                 const Mat4& vp, int tracked_room) const {
+    const int start = portal_geometry_room(world, eye, tracked_room);
+    if (start == kNone) return {};
+    struct View {
+        int room;
+        float left, bottom, right, top;
+    };
+    std::vector<bool> reached(rooms_.size());
+    reached[start] = true;
+    std::vector<View> pending{{start, -1, -1, 1, 1}};
+    for (std::size_t i = 0; i < pending.size(); ++i) {
+        const View view = pending[i];
+        for (const Portal& portal : rooms_[view.room].portals) {
+            if (reached[portal.dest]) continue;
+            std::array<Vec3, 4> projected;
+            for (std::size_t k = 0; k < projected.size(); ++k) {
+                const Vec3& p = portal.quad[k];
+                for (std::size_t j = 0; j < 3; ++j) {
+                    const std::size_t row = j < 2 ? j : 3;
+                    projected[k][j] = vp[row] * p[0] + vp[row + 4] * p[1] + vp[row + 8] * p[2] + vp[row + 12];
+                }
+            }
+            constexpr float near = .01f;
+            View clip{portal.dest, 1, 1, -1, -1};
+            const auto add = [&](const Vec3& p) {
+                clip.left = std::min(clip.left, p[0] / p[2]);
+                clip.right = std::max(clip.right, p[0] / p[2]);
+                clip.bottom = std::min(clip.bottom, p[1] / p[2]);
+                clip.top = std::max(clip.top, p[1] / p[2]);
+            };
+            for (std::size_t k = 0; k < projected.size(); ++k) {
+                const Vec3& a = projected[k];
+                const Vec3& b = projected[(k + 1) % projected.size()];
+                if (a[2] >= near) add(a);
+                if ((a[2] >= near) != (b[2] >= near)) {
+                    auto p = a + (b - a) * ((near - a[2]) / (b[2] - a[2]));
+                    p[2] = near;
+                    add(p);
+                }
+            }
+            clip.left = std::max(clip.left, view.left);
+            clip.bottom = std::max(clip.bottom, view.bottom);
+            clip.right = std::min(clip.right, view.right);
+            clip.top = std::min(clip.top, view.top);
+            if (clip.left >= clip.right || clip.bottom >= clip.top) continue;
+            reached[portal.dest] = true;
+            pending.push_back(clip);
+        }
+    }
+    // An exterior shell visible through a distant portal can overlap a nearby interior.
+    if (const auto overlap = rooms_[start].hidden_overlap) reached[*overlap] = false;
+    return omitted_placements(reached);
 }
 
 // --- Player: water -------------------------------------------------------------------------------------------

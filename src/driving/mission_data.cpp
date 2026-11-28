@@ -225,15 +225,14 @@ std::string player_car_for(std::string_view viv, const MissionData& md) {
 }
 
 const std::vector<DrivingMissionId>& driving_mission_ids() {
-    // ACTION.ELF Menu_IsDrivingLevel (0x9000001-3,5,6) + HT_Level_Driving_*_ST tokens
-    // (Paris/SnowMobile/Alps/Underwater/JungleA); the JungleA slot chains 13A->13B->13C via
-    // CHAIN_NEXT_MISSION, and RACE is the standalone mini-mission (Menu_RunMiniMission).
+    // ACTION.ELF sp_level IDs and their localized mission names, matched to the DRIVING
+    // archives. JungleA chains 13A->13B->13C via CHAIN_NEXT_MISSION.
     static const std::vector<DrivingMissionId> ids = {
         {0x9000001, "MIS01", "paris"},
-        {0x9000002, "MIS3", "alps"},
-        {0x9000003, "MIS4", "alps2"},
-        {0x9000005, "MIS11", "underwater"},
-        {0x9000006, "MIS13A", "jungle1"},
+        {0x9000002, "MIS11", "underwater"},
+        {0x9000003, "MIS13A", "jungle1"},
+        {0x9000005, "MIS3", "alps"},
+        {0x9000006, "MIS4", "alps2"},
     };
     return ids;
 }

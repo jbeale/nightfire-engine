@@ -192,7 +192,9 @@ bool can_see_position(Drone& d, const Vec3& pos) {
     if (NavNetwork* nav = sys.nav()) {
         if (!nav->test_ray_cels(nav->locate(from), nav->locate(pos))) return false;   // AINetwork_TestRayCels
     }
-    return sys.collision().line_of_sight(from, pos, 0xa27);
+    if (!sys.collision().line_of_sight(from, pos, 0xa27)) return false;
+    const auto* moving = sys.world().objects().moving_meshes();
+    return !moving || moving->line_of_sight(from, pos, 0xa27);
 }
 
 bool can_see_object(Drone& d, const TargetRef& t, int bone) {

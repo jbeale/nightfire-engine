@@ -16,9 +16,10 @@ public:
         for (int n = 1; n <= 3; ++n) {
             const Font& f = fonts.font(n);
             auto [w, h] = r.texture_size(f.texture_hash);
-            r.fill({4, y - 2, 308, float(h) * 0.6f + 4}, {0, 0, 0, 0x80});
-            r.draw(f.texture_hash, {6, y, float(w) * 0.6f, float(h) * 0.6f}, {0x80, 0x80, 0x80, 0x80});
-            y += float(h) * 0.6f + 10;
+            const float preview_scale = 0.6f / float(f.raster_scale);
+            r.fill({4, y - 2, 308, float(h) * preview_scale + 4}, {0, 0, 0, 0x80});
+            r.draw(f.texture_hash, {6, y, float(w) * preview_scale, float(h) * preview_scale}, {0x80, 0x80, 0x80, 0x80});
+            y += float(h) * preview_scale + 10;
         }
         ui::TextStyle s;
         const float x = 326;

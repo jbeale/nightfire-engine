@@ -71,7 +71,7 @@ bool can_step_right(Drone& d);
 bool can_roll_left(Drone& d);           // DASC 0x53, behaviour 0x2e, 5.2 m
 bool can_roll_right(Drone& d);
 bool can_backoff(Drone& d);             // DASC 4, behaviour 6, 1.8 m backwards
-bool can_aim_crouch(Drone& d);          // NDrone2_CanAimCrouch: behaviour 0x11, DASC 5, opponent >= 6.0 m
+bool can_aim_crouch(Drone& d);          // NDrone2_CanAimCrouch: behaviour, animation, distance and chance
 // NDrone2_EvasiveMove: when the opponent is aiming at the drone picks strafe (0x75/0x76), dodge (0x77/0x78), roll
 // (0x79/0x7a) or step (0x73/0x74). Returns the chosen state (0 = none); non-bot drones enter it themselves.
 int evasive_move(Drone& d);

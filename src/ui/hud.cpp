@@ -84,6 +84,7 @@ struct Hud::Impl {
     bool mp_clock_ready = false;
     std::deque<Msg> msgs;
     std::uint64_t next_msg_id = 1;
+    std::uint64_t subtitle = 0;
     std::uint32_t frame = 0;
     std::uint32_t rng = 0x2545F491;
     float mul = 1.0f;            // FRAME_RATE_MUL
@@ -556,21 +557,21 @@ struct Hud::Impl {
     }
 
     // Text_UpdateMsg: true when the pane should look at its (new) current message.
-    bool update_msg(Pane& p) {
-        if (!p.cur) {
-            p.cur = first_of_type(p.type);
+    bool update_msg(std::uint64_t& current, HudMsgType type) {
+        if (!current) {
+            current = first_of_type(type);
             return true;
         }
-        Msg* m = find_msg(p.cur);
+        Msg* m = find_msg(current);
         if (!m) {
-            p.cur = first_of_type(p.type);
+            current = first_of_type(type);
             return true;
         }
         if (m->time > 0) m->time -= mul;
         if (m->time > 0) return false;
         std::uint64_t next = m->next;
-        msgs.erase(std::find_if(msgs.begin(), msgs.end(), [&](const Msg& q) { return q.id == p.cur; }));
-        p.cur = next ? next : first_of_type(p.type);
+        msgs.erase(std::find_if(msgs.begin(), msgs.end(), [&](const Msg& q) { return q.id == current; }));
+        current = next ? next : first_of_type(type);
         return true;
     }
 
@@ -583,6 +584,7 @@ struct Hud::Impl {
 
     void update(const HudState& st) {
         ++frame;
+        if (!cfg.multiplayer) update_msg(subtitle, HudMsgType::Subtitle);
         if (cfg.multiplayer) {
             if (mp_mode != st.mp.mode || teams != st.mp.teams || objective != st.mp.objective) {
                 mp_mode = st.mp.mode, teams = st.mp.teams, objective = st.mp.objective;
@@ -1139,7 +1141,7 @@ struct Hud::Impl {
                 hide_all(p);
                 set_alpha(&text, 0);
                 set_alpha(header, 0);
-                if (update_msg(p) && p.cur) {
+                if (update_msg(p.cur, p.type) && p.cur) {
                     if (bar) {
                         bar->s.w = 0;
                         bar->s.x = std::int16_t(bar_info->x + (bar_info->w >> 1));
@@ -1211,7 +1213,7 @@ struct Hud::Impl {
                     }
                     if (objective && objective_done) text.s.color = 0;
                 }
-                if (update_msg(p)) p.step = p.cur ? 2 : 4;
+                if (update_msg(p.cur, p.type)) p.step = p.cur ? 2 : 4;
                 break;
             }
             case 4:
@@ -1242,7 +1244,7 @@ struct Hud::Impl {
         switch (p.step) {
             case 0:
                 hide_all(p);
-                if (update_msg(p) && p.cur) p.step = 2;
+                if (update_msg(p.cur, p.type) && p.cur) p.step = 2;
                 break;
             case 2:
                 text.s.layer = 0x1E;
@@ -1254,7 +1256,7 @@ struct Hud::Impl {
                     if (cur->time > 0 && cur->time < 15.0f) text.s.color = with_alpha(text.s.color, std::uint32_t(cur->time * 17.0f));
                     else text.s.color |= 0xFF;
                 }
-                if (update_msg(p)) p.step = p.cur ? 2 : 4;
+                if (update_msg(p.cur, p.type)) p.step = p.cur ? 2 : 4;
                 break;
             case 4:
                 hide(text);
@@ -1501,6 +1503,23 @@ struct Hud::Impl {
         }
     }
 
+    void draw_subtitle(ui::Renderer& r, ui::TextRenderer& t) const {
+        if (!subtitle) return;
+        const auto line = std::find_if(msgs.begin(), msgs.end(), [&](const Msg& msg) { return msg.id == subtitle; });
+        if (line == msgs.end()) return;
+        // SubtitlesInfo, built by the original text system at boot.
+        Spr sprite;
+        sprite.s.x = 256;
+        sprite.s.y = 426;
+        sprite.s.color = 0x7D6D59FF;
+        sprite.s.shadow = 0x001400FF;
+        sprite.s.flags = kSprOutline;
+        sprite.s.label = 0;
+        sprite.s.format = data.messages[std::size_t(HudMsgType::Subtitle)].format;
+        sprite.text = line->text;
+        draw_sprite(r, t, sprite, 0, 0);
+    }
+
     void draw(ui::Renderer& r, ui::TextRenderer& t) const {
         struct Item {
             const Spr* spr;
@@ -1525,7 +1544,8 @@ struct Hud::Impl {
                 const Spr& s = p.sprites[k];
                 if (s.s.layer == kHidden) continue;
                 const bool flash = pane_index == std::size_t(HudPane::Health) && k >= first_flash && k < first_flash + 4;
-                const bool tint = pane_index == std::size_t(HudPane::RcCar) && k == 0;
+                const bool tint = (pane_index == std::size_t(HudPane::RcCar) && k == 0) ||
+                                  (pane_index == std::size_t(HudPane::Redeemer) && k == 1);
                 const bool widen = flash || tint;
                 items.push_back({&s, widen ? 0.0f : offset_x, 0, widen});
             }
@@ -1549,6 +1569,7 @@ struct Hud::Impl {
         if (crosshair.s.layer != kHidden && own_crosshair) draw_own_crosshair(r);
         draw_radar_markers(r, edge_shift);
         draw_context_prompt(t, -edge_shift);
+        draw_subtitle(r, t);
     }
 
     // The button of the context icon's action beside it (the PS2 HUD shows the icon alone): ThirdIcon 3 is "jump onto
@@ -1639,6 +1660,7 @@ void Hud::reset() { impl_->reset(); }
 void Hud::add_message(const HudMessage& message) { impl_->add_message(message); }
 void Hud::update(const HudState& state) { impl_->update(state); }
 void Hud::draw(ui::Renderer& renderer, ui::TextRenderer& text) const { impl_->draw(renderer, text); }
+void Hud::draw_subtitle(ui::Renderer& renderer, ui::TextRenderer& text) const { impl_->draw_subtitle(renderer, text); }
 HudGeometry Hud::geometry(float canvas_width) const { return impl_->geometry(canvas_width); }
 
 }  // namespace nf

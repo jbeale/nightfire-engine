@@ -70,6 +70,8 @@ public:
     void log_detection() { ++detections_; }
     void log_health(float fraction) { health_ = fraction; }
     void log_bond() { ++bond_; }
+    std::uint32_t bond_count() const { return bond_; }
+    void carry_bond_count(std::uint32_t count) { bond_ = count; }
     void add_elapsed_100ths(std::uint32_t ticks) { elapsed_100ths_ += ticks; }
     void set_elapsed_100ths(std::uint32_t v) { elapsed_100ths_ = v; }
     struct Score {

@@ -92,6 +92,11 @@ public:
     const ObjectWorld& objects() const { return objects_; }
     // The rooms ("cels") the water levels and the player's cel link come from: docs/gameplay.md "Water, zero-G and scan mode".
     const RoomMap& rooms() const { return rooms_; }
+    void enable_portal_geometry(std::string_view room) {
+        rooms_.enable_portal_geometry(room);
+        collision_.set_room_map(rooms_);
+    }
+    void hide_room_overlap(std::string_view room, std::string_view overlap) { rooms_.hide_room_overlap(room, overlap); }
 
 private:
     friend class MpSeedImporter;

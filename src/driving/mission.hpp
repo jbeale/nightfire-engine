@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "driving/ai_driver.hpp"
+#include "driving/alpine_escape.hpp"
 #include "driving/car_weapons.hpp"
 #include "driving/drive_session.hpp"
 #include "driving/driving_hud.hpp"
@@ -64,7 +65,8 @@ struct Pickup {
 class Mission {
 public:
     // `car` empty = the mission default (player_car_for()).
-    Mission(DrivingLevel& level, const std::string& car);
+    Mission(DrivingLevel& level, const std::string& car, bool alpine_gunner = false,
+            AlpineCheckpoint checkpoint = AlpineCheckpoint::Garage);
     ~Mission();
 
     void tick(const PadState& pad);
@@ -74,6 +76,7 @@ public:
     DriveSession& session() { return session_; }
     const DriveSession& session() const { return session_; }
     const DrivingHud& hud() const { return hud_; }
+    const AlpineEscape* alpine() const { return alpine_.get(); }
     const MissionData& data() const { return data_; }
     const RoadNetwork& road() const { return road_; }
     // Spine node ids in route order (for progress display/probing).
@@ -114,7 +117,7 @@ private:
     void build_gates();  // checkpoint trigger volumes along the spine, in route order
     void tick_recoveries();  // lost/progress/gate respawns (all drivers)
     void tick_districts();  // district-seam loading cuts (driver-agnostic respawn)
-    void spawn_ai();
+    void spawn_ai(bool alpine_compound = false);
     void spawn_traffic();
     void spawn_pickups();
     void tick_player(const PadState& pad);
@@ -147,6 +150,7 @@ private:
     std::vector<Pickup> pickups_;
     std::vector<SoundEvent> sfx_;
     DrivingHud hud_;
+    std::unique_ptr<AlpineEscape> alpine_;
 
     // Checkpoint race state.
     struct Gate { Vec3 pos{}; float radius = 0; int walk = -1; };  // mission trigger in route order

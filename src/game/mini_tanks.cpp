@@ -187,10 +187,12 @@ void MiniTanks::drive(Tank& tank, const ActionInput* input, FrameTiming timing) 
 
 void MiniTanks::fire(Tank& tank, const ActionInput& input, FrameTiming timing) {
     const float mul = timing.mul();
-    tank.turret_yaw = std::remainder(tank.turret_yaw - input.actionf(kActTurn) * mul * 0.05f,
+    const MouseLook mouse = input.mouse_look();
+    tank.turret_yaw = std::remainder(tank.turret_yaw - input.actionf(kActTurn) * mul * 0.05f + mouse.yaw,
                                     2.0f * std::numbers::pi_v<float>);
     const float max_pitch = (1.0f - std::fabs(tank.turret_yaw * 1.2732395f)) * 0.129f + 0.08f;
-    tank.turret_pitch = std::clamp(tank.turret_pitch - input.actionf(kActLookPitch) * mul * 0.05f, -0.705f, max_pitch);
+    tank.turret_pitch = std::clamp(tank.turret_pitch - input.actionf(kActLookPitch) * mul * 0.05f - mouse.pitch,
+                                  -0.705f, max_pitch);
     tank.heat = std::max(0.0f, tank.heat - mul);
     if (tank.heat == 0.0f) tank.overheated = false;
     tank.primary_delay -= mul;

@@ -23,8 +23,9 @@ void Player::update_scan(const ActionInput& input, FrameTiming timing) {
     } else {
         velocity[1] = 0.0f;
         look_state_ = 2;
-        yaw_step_ = -input.actionf(kActTurn) * 3.1415927f * rec;
-        const float pitch_delta = -(input.actionf(kActLookPitch) * 3.1415927f * rec);
+        const MouseLook mouse = input.mouse_look();
+        yaw_step_ = -input.actionf(kActTurn) * 3.1415927f * rec + mouse.yaw;
+        const float pitch_delta = -(input.actionf(kActLookPitch) * 3.1415927f * rec) - mouse.pitch;
         // Strafe up to 0.225 and forward up to 0.5 per FRAME_RATE_MUL, eased by 20% of the gap.
         const float strafe = 0.075f * mul * 3.0f, forward = 0.1f * mul * 5.0f;
         velocity[0] = ease_toward(prev_velocity_[0], input.actionf(kActStrafe) * 0.22500001f * mul, mul, 0.2f, -strafe,

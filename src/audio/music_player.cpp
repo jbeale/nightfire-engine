@@ -31,7 +31,11 @@ void MusicPlayer::take_jump(std::uint32_t section) {
 }
 
 void MusicPlayer::jump(std::uint32_t section, bool instant) {
-    if (finished_ || section >= track_->map.sections.size()) return;
+    if (section >= track_->map.sections.size()) return;
+    if (finished_) {
+        if (instant) start(section);
+        return;
+    }
     if (static_cast<std::int64_t>(section) == last_jump_ || section == section_ ||
         static_cast<std::int64_t>(section) == pending_)
         return;

@@ -116,8 +116,8 @@ started by `nfdrive` (gap).
   `world/jungle.atr`)/RACE` (+ `mis01..mis12` slots, 8 shipped); per-mission `.ini`
   (`data\loading\<track>.ini`) is referenced but not on the disc.
 - Frontend mapping for Integration (`mission_data.hpp: driving_mission_ids()`):
-  `0x9000001` Paris/MIS01, `0x9000002` SnowMobile/MIS3, `0x9000003` Alps/MIS4,
-  `0x9000005` Underwater/MIS11, `0x9000006` JungleA/MIS13A (chains to 13B/13C), RACE standalone
+  `0x9000001` Paris Prelude/MIS01, `0x9000005` Alpine Escape/MIS3, `0x9000006` Enemies Vanquished/MIS4,
+  `0x9000002` Deep Descent/MIS11, `0x9000003` Island Infiltration/MIS13A (chains to 13B/13C), RACE standalone
   (`Menu_RunMiniMission`). `nfdrive <gamedir> <name>` runs any of them directly;
   `Mission::set_autodrive()` + `set_player_ai_control` notes in `gameplay.md` cover the
   Movement-2 board/leave handshake (vehicle side).

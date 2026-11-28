@@ -51,6 +51,7 @@ struct SoundEvent {
     std::string name;  // bank sound, e.g. "SFX_RocketTrans" (role Generic)
     Vec3 pos{};
     float volume = 1.0f;
+    bool speech = false;  // mission speech stream, played in cue order
 };
 
 struct Projectile {

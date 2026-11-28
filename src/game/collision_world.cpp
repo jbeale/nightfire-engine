@@ -10,6 +10,8 @@
 #include <span>
 #include <utility>
 
+#include "game/player_water.hpp"
+
 namespace nf {
 
 namespace {
@@ -496,6 +498,7 @@ struct CollisionWorld::Item {
     Mat4 model{};                           // model -> world
     Mat4 inverse{};                         // world -> model
     Vec3 wmin{}, wmax{};                    // world bounds of the root box
+    bool enabled = true;
 };
 
 CollisionWorld::CollisionWorld(Level& level) : CollisionWorld(level, std::nullopt) {}
@@ -566,9 +569,26 @@ void CollisionWorld::add_model(const Level& level, std::size_t handle, std::size
     if (!data.empty()) add_solid(handle, transform, std::make_shared<const Collision>(parse_collision(data)));
 }
 
+void CollisionWorld::add_floor(std::size_t handle, const Mat4& transform, const Vec3& min, const Vec3& max) {
+    const Vec3 a = min;
+    const Vec3 b{max[0], min[1], min[2]};
+    const Vec3 c{max[0], min[1], max[2]};
+    const Vec3 d{min[0], min[1], max[2]};
+    auto collision = std::make_shared<Collision>();
+    collision->boxes.push_back({a, c, true, -1, -1, 0, 2});
+    collision->tris.push_back({{a, d, b}, {0, 1, 0}, -a[1], 0});
+    collision->tris.push_back({{b, d, c}, {0, 1, 0}, -a[1], 0});
+    add_solid(handle, transform, std::move(collision));
+}
+
 void CollisionWorld::move_model(std::size_t handle, const Mat4& transform) {
     for (Item& item : items_)
         if (item.placement == handle) { set_transform(item, transform); return; }
+}
+
+void CollisionWorld::set_model_enabled(std::size_t handle, bool enabled) {
+    for (Item& item : items_)
+        if (item.placement == handle) item.enabled = enabled;
 }
 
 Vec3 CollisionWorld::carry_point(std::size_t handle, const Mat4& next, const Vec3& point) const {
@@ -608,7 +628,7 @@ bool finish_hit(const Found& d, unsigned pick, std::uint8_t flags, float& dist) 
 }  // namespace
 
 std::vector<CollisionHit> CollisionWorld::ray_hits(const Vec3& from, const Vec3& to, unsigned pick,
-                                                   unsigned hit) const {
+                                                   unsigned hit, bool use_portals) const {
     ++stats_.rays;
     std::vector<CollisionHit> hits;
     if (pick & pick::kSkipStatics) return hits;
@@ -619,10 +639,13 @@ std::vector<CollisionHit> CollisionWorld::ray_hits(const Vec3& from, const Vec3&
     const Vec3 lo = {std::min(from[0], to[0]), std::min(from[1], to[1]), std::min(from[2], to[2])};
     const Vec3 hi = {std::max(from[0], to[0]), std::max(from[1], to[1]), std::max(from[2], to[2])};
 
+    const auto blocked = rooms_ && use_portals ? rooms_->blocked_geometry(*this, from, to, 0)
+                                               : std::vector<std::size_t>{};
     // Candidates are visited last-registered first (the original pushes each node on the list head).
     for (std::size_t k = items_.size(); k-- > 0;) {
         const Item& item = items_[k];
-        if (!box_box(lo, hi, item.wmin, item.wmax)) continue;
+        if (!item.enabled || !box_box(lo, hi, item.wmin, item.wmax)) continue;
+        if (std::binary_search(blocked.begin(), blocked.end(), item.placement)) continue;
         float t;
         if (!ray_box(from, dir, radius, item.wmin, item.wmax, t)) continue;
 
@@ -679,9 +702,12 @@ CylinderResult CollisionWorld::cylinder(const CylinderQuery& q) const {
     const Vec3 hi = {std::max(q.a[0], q.b[0]) + reach, std::max(q.a[1], q.b[1]) + reach,
                      std::max(q.a[2], q.b[2]) + reach};
 
+    const auto blocked = rooms_ ? rooms_->blocked_geometry(*this, q.b, q.a, q.radius, q.tracked_room)
+                                : std::vector<std::size_t>{};
     for (std::size_t k = items_.size(); k-- > 0;) {
         const Item& item = items_[k];
-        if (!box_box(lo, hi, item.wmin, item.wmax) || item.placement == q.ignore) continue;
+        if (!item.enabled || !box_box(lo, hi, item.wmin, item.wmax) || item.placement == q.ignore) continue;
+        if (std::binary_search(blocked.begin(), blocked.end(), item.placement)) continue;
 
         Local h;
         h.a = transform_point(item.inverse, res.a);
@@ -760,7 +786,7 @@ PlaceResult CollisionWorld::place_object(const Vec3& pos_in, const PlaceFrame& f
                      std::max(r.pos[2], rear[2]) + 2 * extent};
     for (std::size_t k = items_.size(); k-- > 0;) {
         const Item& item = items_[k];
-        if (!box_box(lo, hi, item.wmin, item.wmax)) continue;
+        if (!item.enabled || !box_box(lo, hi, item.wmin, item.wmax)) continue;
         collect_triangles(*item.coll, item.model, transform_point(item.inverse, r.pos),
                           transform_point(item.inverse, rear), extent, 0xD, 1, soup);
     }

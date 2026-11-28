@@ -10,9 +10,11 @@
 #include <string_view>
 #include <vector>
 
+#include "game/input.hpp"
+
 namespace nf::net {
 
-constexpr std::uint16_t kProtocolVersion = 7;
+constexpr std::uint16_t kProtocolVersion = 8;
 constexpr std::uint8_t kOwnerMovementSchemaVersion = 2;
 constexpr std::uint8_t kMaxServerBots = 16;
 constexpr std::size_t kDataHashBytes = 32;
@@ -41,7 +43,7 @@ struct PadInput {
     std::array<std::uint8_t, 4> sticks{0x80, 0x80, 0x80, 0x80};
     std::uint32_t view_tick = 0;  // newest server snapshot represented by the client's rendered/interpolated pose
     std::uint8_t local_player = 0;  // per-connection local player index
-
+    MouseLook mouse{};
 };
 struct Header {
     Message message = Message::Ack;

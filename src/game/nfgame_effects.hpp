@@ -34,6 +34,7 @@ public:
     void set_map_lights(const std::vector<MapLight>& lights) { lights_.add_map_lights(lights); }
 
     void consume(const WeaponEvents& events);   // CPU only: safe to call in headless scripted loops
+    void emit_aircraft_smoke(const Vec3& position);
     void tick(float mul, const std::vector<Projectile>& projectiles);  // advance visual state once per logic tick
     // Depth-tested draw before the weapon-layer depth clear: projectile models, decals, puffs, blasts.
     void draw(const Camera& cam, float aspect, CharacterRenderer& chars,
@@ -80,6 +81,9 @@ public:
     void set_multiplayer(bool mp) { is_mp_ = mp; }  // gates SP-only debris RNG
     // Entity + debris instances for the session's draw_objects call (LevelRenderer::ObjectDraw).
     std::vector<LevelRenderer::ObjectDraw> take_blast_draws(float interpolation = 1.0f);
+    std::vector<LevelRenderer::ObjectDraw> projectile_draws(const std::vector<Projectile>& projectiles,
+                                                           float interpolation,
+                                                           const Projectile* camera_projectile = nullptr);
     std::vector<SoundEvent> take_blast_sounds();  // script SoundStarts for the session audio drain
     Vec3 jitter(float scale);              // shared game_rng scatter (MP-lockstep order)
     unsigned upload(std::uint32_t hash);   // sprite hash -> GL texture (0 when the library has none)
@@ -91,6 +95,7 @@ public:
     DynamicLights lights_;
     SwitchChannels switches_;   // all off: channel-0 lights (all weapon lights) always enabled
     std::vector<Decal> decals_;
+    std::vector<WeaponEvents::Beam> beams_;
     std::vector<Puff> puffs_;
     std::array<bool, World::kMaxPlayers> muzzle_flash_added_{};
     std::vector<Blast> blasts_;

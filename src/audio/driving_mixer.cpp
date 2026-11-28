@@ -190,6 +190,7 @@ struct DrivingAudio::Impl {
     };
 
     std::mutex mu;
+    bool paused = false;
     std::vector<LoadedBank> banks;
     std::map<std::pair<const EaBank*, std::size_t>, std::shared_ptr<const EaSample>> decoded;
     std::vector<Voice> voices;
@@ -276,6 +277,10 @@ struct DrivingAudio::Impl {
     // --- rendering -------------------------------------------------------------------------------------------
     void render(std::int16_t* out, std::size_t frames) {
         std::lock_guard lock(mu);
+        if (paused) {
+            std::fill_n(out, frames * 2, 0);
+            return;
+        }
         acc.assign(frames * 2, 0.0f);
         for (Voice& v : voices) {
             if (!v.playing) {
@@ -462,6 +467,11 @@ void DrivingAudio::render(std::int16_t* out, std::size_t frames) { impl_->render
 
 bool DrivingAudio::open_device() { return impl_->sink.open(); }
 void DrivingAudio::close_device() { impl_->sink.close(); }
+
+void DrivingAudio::set_paused(bool paused) {
+    std::lock_guard lock(impl_->mu);
+    impl_->paused = paused;
+}
 const std::string& DrivingAudio::last_error() const { return impl_->sink.error(); }
 
 }  // namespace nf::audio

@@ -19,7 +19,7 @@ ui::Accessibility accessibility_from_config(const AppConfig& cfg);
 // Applies the display, audio and accessibility settings of `cfg` to the running window, renderer and menu audio.
 void apply_settings(const AppConfig& cfg, Window& window, ui::Renderer& renderer, audio::AudioSystem* audio);
 
-// The Settings screen (main menu Square): Graphics, Widescreen, Audio and Accessibility pages drawn in the front
+// The Settings screen (main menu Square): display, audio, accessibility and PC controls drawn in the front
 // end's multiplayer-page style. Changes apply at once and are saved to nightfire.cfg when the screen closes.
 // `press` replays `set-up`, `set-down`, `set-left`, `set-right`, `set-cross` and `set-circle` tokens (other tokens are
 // skipped); with a script the screen draws once, saves `shot` when given, and returns.

@@ -562,6 +562,8 @@ struct MpSession::Impl {
             }
             effects->draw(cam, r.aspect(), *chars,
                           network ? network_projectiles : session->weapons().projectiles(), interpolation);
+            renderer->draw_objects(cam, r.aspect(), effects->projectile_draws(
+                network ? network_projectiles : session->weapons().projectiles(), interpolation));
             renderer->draw_objects(cam, r.aspect(), effects->take_blast_draws(interpolation));
             glClear(GL_DEPTH_BUFFER_BIT);
             ViewModel vm = session->weapons().viewmodel(i);
@@ -805,6 +807,7 @@ MpResult MpSession::run_interactive() {
     const bool claimed = std::any_of(s.direct.devices.begin(), s.direct.devices.end(),
                                      [](const SlotDevice& d) { return !d.empty(); });
     s.pads = claimed ? open_local_pads(s.direct.devices, s.session->humans()) : open_local_pads(s.session->humans());
+    for (auto& pad : s.pads) pad.set_mouse_sensitivity(s.config.mouse_look_sensitivity);
     assign_prompt_devices(s.pads);
     for (std::size_t i = 0; i < s.pads.size(); ++i) {
         const SlotDevice d = s.pads[i].device();
@@ -854,7 +857,8 @@ MpResult MpSession::run_interactive() {
         last = now;
         while (accumulator >= kStep) {
             PadInputs pads{};
-            for (int i = 0; i < s.session->humans(); ++i) pads[std::size_t(i)] = s.pads[std::size_t(i)].sample();
+            for (int i = 0; i < s.session->humans(); ++i)
+                pads[std::size_t(i)] = s.pads[std::size_t(i)].sample(s.world->settings(i).invert_look);
             int pauser = -1;   // the first local player whose start button is down opens their pause menu
             for (int i = 0; i < s.session->humans() && pauser < 0; ++i)
                 if (pads[std::size_t(i)].buttons & kPadStart) pauser = i;
@@ -911,6 +915,7 @@ MpResult MpSession::run_network_interactive(NetworkSession& network, long frames
     Impl& s = *impl_;
     s.network = &network;
     s.pads = open_local_pads(nf::net::kMaxLocalPlayers);
+    for (auto& pad : s.pads) pad.set_mouse_sensitivity(s.config.mouse_look_sensitivity);
     assign_prompt_devices(s.pads);
     int gamepad_count = 0;
     if (SDL_JoystickID* ids = SDL_GetGamepads(&gamepad_count)) {
@@ -998,7 +1003,7 @@ MpResult MpSession::run_network_interactive(NetworkSession& network, long frames
     };
     auto input_for_frame = [&](long frame, std::size_t local) {
         if (use_script) return local == 0 ? scripted_pad(frame) : PadState{};
-        return local < s.pads.size() ? s.pads[local].sample() : PadState{};
+        return local < s.pads.size() ? s.pads[local].sample(local == 0 && s.config.invert_y) : PadState{};
     };
     std::uint8_t viewer = 0;
     const double kStep = s.timing.rec();

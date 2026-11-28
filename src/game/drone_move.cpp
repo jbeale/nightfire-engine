@@ -199,7 +199,7 @@ bool can_backoff(Drone& d) {
 }
 bool can_aim_crouch(Drone& d) {
     if (!d.has_beh(beh::kAimCrouch) || !anim_can_do(d, kAimCrouch)) return false;
-    return d.opp_dist >= 6.0f;
+    return d.opp_dist >= 6.0f && d.sys->rand_int(2) == 0;
 }
 
 bool opponent_facing_me(const Drone& d, float degrees) {
@@ -588,7 +588,9 @@ void collision_step(Drone& d) {
             q.b = d.pos + to_world(d.mv.seeded_capsule_b_offset, d.yaw);
             q.radius = d.mv.seeded_capsule_radius;
         } else {
-            q.a = {d.pos[0], d.pos[1] - h + 1.4f, d.pos[2]};
+            // Animated campaign rigs use the same root-to-feet endpoints as NDrone2_Collision.
+            const float top = d.anim.height_offset ? d.radius : 1.4f - h;
+            q.a = {d.pos[0], d.pos[1] + top, d.pos[2]};
             q.b = {d.pos[0], d.pos[1] - h + d.radius, d.pos[2]};
             q.radius = d.radius;
         }

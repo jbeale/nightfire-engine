@@ -284,6 +284,7 @@ std::array<float, kActionCount> map_inputs(const PadState& p, int style, int pla
 
 void ActionInput::update(const PadState& pad, const InputTables& tables, const PlayerSettings& settings, int player) {
     value_ = map_inputs(pad, settings.controller_style, player);
+    mouse_ = pad.mouse;
 
     // Input_Update: shape the sticks (Octopussy and Thunderball keep the turn and pitch axes raw), honour the invert
     // option.

@@ -16,6 +16,7 @@
 
 #include "app/frontend_pads.hpp"
 #include "app/menu_background.hpp"
+#include "app/menu_music.hpp"
 #include "app/app.hpp"
 #include "app/movie.hpp"
 #include "app/session_drive.hpp"
@@ -28,6 +29,7 @@
 #include "app/settings_screen.hpp"
 #include "app/net_client.hpp"
 #include "audio/audio.hpp"
+#include "driving/mission_data.hpp"
 #include "render/window.hpp"
 #include "ui/art_sheet.hpp"
 #include "ui/frontend.hpp"
@@ -183,24 +185,27 @@ void report_result(const FrontendResult& r) {
 
 // One frontend screen (main menu at boot, or after a session ends). Returns
 // false when the application should exit.
+constexpr std::uint32_t kPageMissionSelect = 0x4000001C;
+constexpr std::uint32_t kPageMainMenu = 0x40000002;
+
 bool run_frontend(AppContext& ctx, Window& window, ui::Renderer& ui, ui::TextRenderer& text, AppConfig& cfg,
                   audio::AudioSystem* audio, const std::string& press, const std::string& shot,
                   const std::optional<std::uint32_t>& first_page, FrontendResult& out, bool match_takes_shot = false) {
     Frontend frontend(ctx.assets, ctx.menu, &ctx.mp_data, &ctx.sp_data);
+    if (auto profile = load_profile(cfg.profile.empty() ? "Bond" : cfg.profile))
+        frontend.set_profile(std::move(*profile));
+    frontend.set_mission_difficulty(cfg.difficulty + 1);
     sync_config_to_frontend(cfg, frontend);
     frontend.open(FrontendMode::MainMenu, first_page);
     MenuBackground background(ctx.gamedir);
     background.advance();
     FrontendPads pads;
     ui::select_prompts(0, InputContext::Menu);
-    bool trace = true;
     std::uint32_t last_page = 0;
     auto play_sounds = [&] {
         if (!audio) return;
-        for (ui::MenuSound s : frontend.take_sounds()) {
-            const std::uint32_t id = menu_sound_sfx(s);
-            if (id != 0) audio->play_sfx(id);
-        }
+        pump_menu_sounds(frontend.take_sounds(), [audio](std::uint32_t id) { audio->play_sfx(id); });
+        audio->update();
         audio->update();
     };
     if (!press.empty() || !shot.empty()) {
@@ -240,6 +245,10 @@ bool run_frontend(AppContext& ctx, Window& window, ui::Renderer& ui, ui::TextRen
     double accumulator = 0;
     Uint64 last = SDL_GetTicksNS();
     bool quit_app = false;
+    // Results owns the Bond cue and hands the same playing instance to the mission wheel.
+    const bool keeps_victory_theme = first_page == kPageMissionSelect && audio &&
+                                     audio->is_sfx_playing(kMenuBondTheme);
+    if (!keeps_victory_theme) play_menu_music(audio, kMenuNightfireTheme, cfg.music_volume);
     while (!frontend.wants_close() && !quit_app) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
@@ -251,16 +260,20 @@ bool run_frontend(AppContext& ctx, Window& window, ui::Renderer& ui, ui::TextRen
         while (accumulator >= 1.0 / 30.0) {
             pads.sample(frontend);
             background.advance();
+            play_sounds();
             // Movie pages hand their PSS id to the game (fallback transition when missing).
             if (std::uint32_t movie = frontend.take_movie_request()) {
+                stop_menu_music(audio);
                 MovieScreen screen(window, ui, text, audio, gamepad, ctx.gamedir);
                 screen.play(movie);
                 frontend.movie_finished();
+                play_menu_music(audio, kMenuNightfireTheme, cfg.music_volume);
             }
             accumulator -= 1.0 / 30.0;
         }
-        if (trace && frontend.page_id() != last_page) {
+        if (frontend.page_id() != last_page) {
             last_page = frontend.page_id();
+            if (last_page == kPageMainMenu) play_menu_music(audio, kMenuNightfireTheme, cfg.music_volume);
             std::printf("frontend page 0x%08x\n", last_page);
         }
         int w, h;
@@ -295,6 +308,10 @@ bool run_frontend(AppContext& ctx, Window& window, ui::Renderer& ui, ui::TextRen
     const PlayerOptions& p = frontend.player_options();
     cfg.controller_style = p.controller_style;
     cfg.invert_y = p.invert_y;
+    if (frontend.result().action == FrontendResult::Action::StartMission) {
+        cfg.profile = frontend.profile_name();
+        cfg.difficulty = std::clamp(frontend.result().difficulty - 1, 0, 2);
+    }
     save_config(config_path(), cfg);
     ui.set_pillarbox(cfg.pillarbox);
     report_result(frontend.result());
@@ -309,6 +326,7 @@ struct Args {
     // Session selection (empty = boot to the frontend).
     std::string mission;
     int difficulty = -1;
+    std::string checkpoint;
     std::vector<std::pair<int, int>> channels;  // --channel CH=VAL presets (nfgame debug hook)
     bool mp = false;
     std::vector<std::string> mp_args;
@@ -368,6 +386,7 @@ bool parse_args(int argc, char** argv, Args& a) {
         if (v == "--help" || v == "-h") a.help = true;
         else if (v == "--mission") need(a.mission);
         else if (v == "--difficulty" && i + 1 < argc) a.difficulty = std::atoi(argv[++i]);
+        else if (v == "--checkpoint" && i + 1 < argc) a.checkpoint = argv[++i];
         else if (v == "--channel" && i + 1 < argc) {  // debug: preset a mission switch channel (CH=VAL)
             const std::string spec = argv[++i];
             const auto eq = spec.find('=');
@@ -524,7 +543,9 @@ void usage(const char* prog) {
                  "  --online-master IPv4[:port] adds the registry to that join screen; --listen-port and "
                  "--host-time-limit configure a listen host.\n"
                  "  --mp options: nfgame set (--mode/--players/--bots/--frag-limit/--time-limit/--weapons/...).\n"
-                 "  --give ID: debug equip (scoped-capture hook): give + select the weapon at session start.\n",
+                 "  --give ID: debug equip (scoped-capture hook): give + select the weapon at session start.\n"
+                 "  --checkpoint truck|library|safe|gondola: start an Exchange debug checkpoint.\n"
+                 "  --drive alps --checkpoint garage|forest|gate|bridge|chalet|pursuit|lower-forest: start Alpine Escape there.\n",
                  prog);
 }
 
@@ -630,6 +651,10 @@ int run(int argc, char** argv) {
     menu_audio.set_music_volume(cfg.music_volume);
     audio::AudioSystem* menu_audio_ptr = args.mute ? nullptr : &menu_audio;
     if (menu_audio_ptr && !menu_audio_ptr->open_device()) menu_audio_ptr = nullptr;
+    if (menu_audio_ptr) {
+        menu_audio.load_bank_hash(kMenuNightfireBank);
+        menu_audio.load_bank_hash(kMenuBondBank);
+    }
     ui::Renderer ui(ctx->assets.sprites);
     apply_settings(cfg, window, ui, menu_audio_ptr);
     {
@@ -697,23 +722,41 @@ int run(int argc, char** argv) {
         screen.play(id, args.shot, args.frames);
         return 0;
     }
-    if (!args.mission.empty()) {
+    if (!args.mission.empty() || (!args.checkpoint.empty() && args.drive.empty())) {
         SpLaunch launch{args.mission, args.difficulty >= 0 ? args.difficulty : cfg.difficulty + 1, args.channels,
                         args.give};
+        if (!args.checkpoint.empty()) {
+            auto checkpoint = checkpoint_launch(args.checkpoint, launch.difficulty);
+            if (!checkpoint) {
+                std::fprintf(stderr, "nightfire: unknown checkpoint '%s'\n", args.checkpoint.c_str());
+                return 2;
+            }
+            launch = std::move(*checkpoint);
+        }
         const bool scripted = args.frames >= 0 || !args.shot.empty() || !args.inputs.empty();
         SpHeadless h{args.frames >= 0 ? args.frames : 300, args.shot, args.inputs};
+        bool show_mission_select = false;
         while (true) {
-            SpSession session(*ctx, window, ui, text, launch, cfg);
+            SpSession session(*ctx, window, ui, text, launch, cfg, menu_audio_ptr);
             if (!session.ready()) return 1;
             const SpResult r = scripted ? session.run_headless(h) : session.run_interactive();
+            if (!r.checkpoint.empty()) launch = *checkpoint_launch(r.checkpoint, launch.difficulty);
             if (r.exit == SpExit::Restart) continue;
+            if (r.exit == SpExit::MissionSelect) {
+                args.first_page = kPageMissionSelect;
+                cfg.difficulty = std::clamp(launch.difficulty - 1, 0, 2);
+                show_mission_select = true;
+                break;
+            }
             if (r.exit != SpExit::NextMission || (r.next_level & 0x0F000000) != 0x07000000) break;
             char bin[16];
             std::snprintf(bin, sizeof(bin), "%08x.bin", r.next_level);
-            launch = SpLaunch{bin, launch.difficulty, {}, -1, r.inventory, r.entry_channel};
+            launch = SpLaunch{bin, launch.difficulty, {}, -1, r.inventory, r.entry_channel, r.bond_count};
+            launch.stats = r.stats;
+            launch.play_frames = r.play_frames;
             h.inputs.clear();
         }
-        return 0;
+        if (!show_mission_select) return 0;
     }
     if (args.mp) {
         MpDirect direct_mp;
@@ -755,7 +798,17 @@ int run(int argc, char** argv) {
         return 0;
     }
     if (!args.drive.empty()) {
-        DriveSessionApp session(*ctx, window, ui, text, args.drive, args.car, cfg);
+        std::optional<driving::AlpineCheckpoint> checkpoint;
+        if (!args.checkpoint.empty()) {
+            const auto& options = driving::kAlpineCheckpoints;
+            const auto option = std::ranges::find(options, args.checkpoint, &driving::AlpineCheckpointOption::key);
+            if (option == std::end(options)) {
+                std::fprintf(stderr, "nightfire: unknown Alpine Escape checkpoint '%s'\n", args.checkpoint.c_str());
+                return 2;
+            }
+            checkpoint = option->checkpoint;
+        }
+        DriveSessionApp session(*ctx, window, ui, text, args.drive, args.car, cfg, args.mute, checkpoint);
         if (!session.ready()) return 1;
         if (args.frames >= 0 || !args.shot.empty() || !args.inputs.empty()) {
             DriveHeadless h;
@@ -778,7 +831,24 @@ int run(int argc, char** argv) {
     std::uint32_t pending_level = 0;  // nonzero: skip the frontend and launch this sp_level id
     MissionSystem::Inventory pending_inventory;
     std::uint16_t pending_entry = 0;
+    std::uint32_t pending_bond_count = 0;
     int pending_difficulty = cfg.difficulty + 1;
+    PlrStats pending_stats;
+    std::uint64_t pending_play_frames = 0;
+    const auto continue_mission = [&](const SpResult& r, int difficulty) {
+        if (r.exit == SpExit::MissionSelect) {
+            args.first_page = kPageMissionSelect;
+            cfg.difficulty = std::clamp(difficulty - 1, 0, 2);
+        } else if (r.exit == SpExit::NextMission) {
+            pending_level = r.next_level;
+            pending_inventory = r.inventory;
+            pending_entry = r.entry_channel;
+            pending_bond_count = r.bond_count;
+            pending_stats = r.stats;
+            pending_play_frames = r.play_frames;
+            pending_difficulty = difficulty;
+        }
+    };
     while (true) {
         if (pending_level == 0) {
             FrontendResult result;
@@ -799,8 +869,11 @@ int run(int argc, char** argv) {
             args.first_page.reset();
             args.shot.clear();
             if (result.action == FrontendResult::Action::Quit) return 0;
+            if (result.action != FrontendResult::Action::OpenSettings) stop_menu_music(menu_audio_ptr);
             if (result.action == FrontendResult::Action::OpenSettings) {
+                const int old_volume = cfg.music_volume;
                 run_settings(*ctx, window, ui, text, cfg, menu_audio_ptr, menu_press, menu_shot);
+                if (cfg.music_volume != old_volume) stop_menu_music(menu_audio_ptr);
                 if (!frontend_live) return 0;
                 args.first_page = 0x40000002;   // back on the main menu
                 continue;
@@ -942,8 +1015,8 @@ int run(int argc, char** argv) {
             }
             if (result.action == FrontendResult::Action::StartMission) {
                 // The mission map can also name a driving mission: launch it on the DRIVING side.
-                if (driving::find_level(result.level_bin)) {
-                    DriveSessionApp drive(*ctx, window, ui, text, result.level_bin, "", cfg);
+                if (const auto* mission = driving::driving_mission_for_id(result.level_id)) {
+                    DriveSessionApp drive(*ctx, window, ui, text, std::string(mission->name), "", cfg, args.mute);
                     if (drive.ready()) {
                         while (true) {
                             const DriveResult dr = drive.run_interactive();
@@ -954,16 +1027,12 @@ int run(int argc, char** argv) {
                 }
                 SpLaunch launch{result.level_bin, result.difficulty, {}};
                 while (true) {
-                    SpSession session(*ctx, window, ui, text, launch, cfg);
+                    SpSession session(*ctx, window, ui, text, launch, cfg, menu_audio_ptr);
                     if (!session.ready()) break;
                     const SpResult r = session.run_interactive();
+                    if (!r.checkpoint.empty()) launch = *checkpoint_launch(r.checkpoint, launch.difficulty);
                     if (r.exit == SpExit::Restart) continue;
-                    if (r.exit == SpExit::NextMission) {
-                        pending_level = r.next_level;
-                        pending_inventory = r.inventory;
-                        pending_entry = r.entry_channel;
-                        pending_difficulty = launch.difficulty;
-                    }
+                    continue_mission(r, launch.difficulty);
                     break;
                 }
             } else if (result.action == FrontendResult::Action::StartMultiplayer && result.launch) {
@@ -1009,18 +1078,9 @@ int run(int argc, char** argv) {
         const std::uint32_t chained = pending_level;
         pending_level = 0;
         if ((chained & 0x0F000000) == 0x09000000) {
-            static const std::pair<std::uint32_t, const char*> kDriveMissions[] = {
-                {0x09000001, "paris"},      // MIS01
-                {0x09000002, "alps"},       // MIS3 SnowMobile (docs/driving-missions.md)
-                {0x09000003, "alps2"},      // MIS4 Alps chase
-                {0x09000005, "underwater"},  // MIS11
-                {0x09000006, "jungle1"}};   // MIS13A (chains to 13B/13C internally)
-            const char* name = nullptr;
-            for (const auto& [id, n] : kDriveMissions) {
-                if (id == chained) name = n;
-            }
-            if (!name) continue;  // unmapped driving row: back to the frontend
-            DriveSessionApp drive(*ctx, window, ui, text, name, "", cfg);
+            const auto* mission = driving::driving_mission_for_id(chained);
+            if (!mission) continue;
+            DriveSessionApp drive(*ctx, window, ui, text, std::string(mission->name), "", cfg, args.mute);
             if (!drive.ready()) continue;
             while (true) {
                 const DriveResult dr = drive.run_interactive();
@@ -1030,19 +1090,20 @@ int run(int argc, char** argv) {
         }
         char bin[16];
         std::snprintf(bin, sizeof(bin), "%08x.bin", chained);
-        SpLaunch launch{bin, pending_difficulty, {}, -1, std::move(pending_inventory), pending_entry};
+        SpLaunch launch{bin, pending_difficulty, {}, -1, std::move(pending_inventory), pending_entry,
+                        pending_bond_count};
+        launch.stats = std::exchange(pending_stats, {});
+        launch.play_frames = std::exchange(pending_play_frames, 0);
         pending_inventory = {};
         pending_entry = 0;
+        pending_bond_count = 0;
         while (true) {
-            SpSession session(*ctx, window, ui, text, launch, cfg);
+            SpSession session(*ctx, window, ui, text, launch, cfg, menu_audio_ptr);
             if (!session.ready()) break;
             const SpResult r = session.run_interactive();
+            if (!r.checkpoint.empty()) launch = *checkpoint_launch(r.checkpoint, launch.difficulty);
             if (r.exit == SpExit::Restart) continue;
-            if (r.exit == SpExit::NextMission) {
-                pending_level = r.next_level;
-                pending_inventory = r.inventory;
-                pending_entry = r.entry_channel;
-            }
+            continue_mission(r, launch.difficulty);
             break;
         }
     }

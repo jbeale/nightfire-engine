@@ -34,6 +34,7 @@ struct AppConfig {
     // Controls (P_CNCONTROLS per-player: style + Y inversion).
     int controller_style = 7;
     bool invert_y = false;
+    int mouse_look_sensitivity = 150;  // percent of the base mouse rotation
     // Session options (P_CNOPTIONS radios, PlayerSetting bytes; see GameOptions).
     bool vibration = false;
     bool auto_aim = false;

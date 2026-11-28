@@ -40,8 +40,8 @@ class SpSystem;
 enum class Speech : int { Patrol, Attack, Pain, Death, Surrender, CivilianScared, SeenPlayer, HeardNoise, Other };
 
 // ---- switch channels (`switch_channels` @0x26fc90, 256 bytes; scripts/levels set them) --------------------------
-// No scripting engine exists yet: every channel starts OFF; `WaitSwitch` waits for its channel, spawners and cover
-// nodes read theirs. Channel 0 means "no channel" everywhere.
+// Mission scripts and placed objects drive the same channel numbers as drone states, spawners, and cover nodes.
+// Channels start off until initialized by the mission or a placed object. Channel 0 means "no channel".
 class SwitchChannels {
 public:
     bool on(int ch) const { return ch > 0 && ch < 256 && v_[std::size_t(ch)] != 0; }

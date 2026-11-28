@@ -272,10 +272,21 @@ void CharacterRenderer::draw(const Camera& cam, float aspect, const SkinDef& ski
                              const Mat4& model, unsigned sleeve, const std::vector<float>& facial,
                              const CharacterLighting& lighting, std::uint32_t hidden_part, std::uint32_t attached_hash,
                              const Mat4& attached_matrix, bool weapon_arm_only) {
+    const Mat4 view_projection = mul(perspective(cam.fovy, aspect, 0.05f, 200.0f), cam.view());
+    const Vec3 right = cam.right();
+    const Vec3 up = cross(right, cam.forward());
+    draw_projected(view_projection, right, up, skin, palette, model, sleeve, facial, lighting,
+                   hidden_part, attached_hash, attached_matrix, weapon_arm_only);
+}
+
+void CharacterRenderer::draw_projected(const Mat4& view_projection, const Vec3& right, const Vec3& raw_up,
+                                       const SkinDef& skin, const Palette& palette, const Mat4& model,
+                                       unsigned sleeve, const std::vector<float>& facial,
+                                       const CharacterLighting& lighting, std::uint32_t hidden_part,
+                                       std::uint32_t attached_hash, const Mat4& attached_matrix,
+                                       bool weapon_arm_only) {
     if (palette.skin.size() > std::size_t(kMaxBones)) throw std::runtime_error("skeleton exceeds the shader palette");
-    const Mat4 view = cam.view();
-    const Mat4 mv = mul(view, model);
-    const Mat4 mvp = mul(perspective(cam.fovy, aspect, 0.05f, 200.0f), mv);
+    const Mat4 mvp = mul(view_projection, model);
     glUseProgram(program_);
     glActiveTexture(GL_TEXTURE0);
     glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp.data());
@@ -288,7 +299,6 @@ void CharacterRenderer::draw(const Camera& cam, float aspect, const SkinDef& ski
     // uploads viewer view-matrix rows 0/1 (unit camera axes: viewer_tag+0x120 is a matrix,
     // see MatrixBond2PS2_2 in PS2WorldViewVU1Kick2) scaled by 1/256 with a 0.5 bias, reproduced here verbatim:
     // the sweep is tiny on purpose, pinning each surface near its texture's centre texel (matte finish).
-    const Vec3 right = cam.right(), raw_up = cross(right, cam.forward());
     const float up_len = std::sqrt(dot(raw_up, raw_up));
     glUniform3f(u_cam_right_, right[0] / 256.0f, right[1] / 256.0f, right[2] / 256.0f);
     glUniform3f(u_cam_up_, raw_up[0] / up_len / 256.0f, raw_up[1] / up_len / 256.0f, raw_up[2] / up_len / 256.0f);

@@ -63,7 +63,8 @@ TextMetrics TextRenderer::layout(float x0, float y0, std::string_view text, cons
         if (prev) x += g.lead * sx;
         if (emit) {
             Rect dst{x, y + g.y_offset * sy - (g0.h + g0.y_offset) * sy, w, h};
-            renderer_->draw(font.texture_hash, dst, {float(g.u), float(g.v), float(g.w), float(g.h)}, color);
+            const float raster = float(font.raster_scale);
+            renderer_->draw(font.texture_hash, dst, {g.u * raster, g.v * raster, g.w * raster, g.h * raster}, color);
         }
         x += g.trail * sx + w;
         width = std::max(width, x - x0);

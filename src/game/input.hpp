@@ -25,11 +25,20 @@ enum PadButton : std::uint16_t {
     kPadSquare = 1 << 15,
 };
 
-// One controller sample per 30 Hz logic frame, in the raw form the game reads, so recorded
-// oracle inputs replay bit-exactly. Sticks: 0 = left/up, 0x80 = centre, 0xFF = right/down.
+// Relative camera rotation in radians for this sample. Mouse motion is consumed once.
+struct MouseLook {
+    static constexpr float kMaxDelta = 32.0f;
+    float yaw = 0, pitch = 0;
+
+    bool moved() const { return yaw != 0 || pitch != 0; }
+};
+
+// One input sample per logic tick. Pad fields retain the PS2 representation for recorded inputs.
+// Sticks: 0 = left/up, 0x80 = centre, 0xFF = right/down.
 struct PadState {
     std::uint16_t buttons = 0;
     std::uint8_t rx = 0x80, ry = 0x80, lx = 0x80, ly = 0x80;
+    MouseLook mouse{};
 
     bool held(PadButton b) const { return (buttons & b) != 0; }
 };

@@ -324,7 +324,6 @@ fe.set_mission_results(...); fe.set_debriefing(...);  // before results / debrie
 fe.set_credits(load_credits(elf, strings));           // once (credits roll)
 if (auto saved = load_profile(codename)) fe.set_profile(*saved);  // or fresh_profile
 fe.open(FrontendMode::MainMenu);                        // or Pause with the level's MenuFile
-pump_menu_sounds({}, [](std::uint32_t id) {});          // once: play kMenuAmbientA/B via AudioSystem
 for each 30 Hz frame: fe.update(pad); fe.draw(renderer, text);
 pump_menu_sounds(fe.take_sounds(), [&](std::uint32_t id) { audio.play_sfx(id); });
 if (std::uint32_t movie = fe.take_movie_request()) play_pss(movie);  // MOVIES/30_FPS/%08X.PSS, then movie_finished()
@@ -342,8 +341,9 @@ The frontend returns a launch request and draws over the game: `FrontendResult` 
 then the arena feed (`apply_arena_hud(session.hud(slot), state.mp)`,
 `project_name_tags(...)`, `to_hud_message(...)` from `take_messages()`), then `hud.update(state)` +
 `hud.draw(...)` over the 3D view. Menu sounds flow through `take_sounds()` + `pump_menu_sounds`
-(`ui/menu_audio.hpp`: `menu_sound_sfx` is the `Menu_PlaySound` id map `0x1D8/0x1D9/0x1DA`; menu ambience
-`0x1D7/0x470`, credits music track `0x27`).
+(`ui/menu_audio.hpp`: `menu_sound_sfx` is the `Menu_PlaySound` ID map `0x1D8/0x1D9/0x1DA`).
+The app plays the Nightfire theme (`0x1D7`, bank 12) in the main menu and the Bond theme
+(`0x470`, bank 56) through mission results and the following mission wheel. Only one theme plays at a time.
 
 ### Runtime notes
 
@@ -421,7 +421,7 @@ spinner) while the session opens. `MenuChrome::spinner` is the shared busy anima
 
 **Settings screen** (`src/app/settings_screen.*`, main menu **Square**; the prompt row names it). Pages Graphics
 (display mode, V-Sync), Widescreen (native widescreen / original 4:3 pillarbox), Audio (music and effects volume,
-speakers) and Accessibility, drawn with `MenuChrome` in the Join Game style: category list with icons, the
+speakers), Accessibility and Controls (mouse sensitivity), drawn with `MenuChrome` in the Join Game style: category list with icons, the
 settings panel with the original radio arrows (skin set 3 component 6) and a ten-segment volume meter, the
 description box and the glyph prompt row. Changes apply at once (`apply_settings`) and are saved when the screen
 closes. Scripted runs use `set-up`, `set-down`, `set-left`, `set-right`, `set-cross` and `set-circle` in `--press`.

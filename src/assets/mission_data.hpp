@@ -71,7 +71,7 @@ std::vector<MissionEntry> load_mission_data(const Elf32& elf);
 
 // ---- level order (`sp_level` @0x2df2e0, 12 x 0x18 `M_ITEM`; `load_sp_menu`) ----------------------
 // `value` is the level id: 0x070000xx ACTION story maps, 0x0900000x DRIVING.ELF missions
-// (Driving slice: 1 Paris, 2 SnowMobile, 3 Alps, 5 Underwater, 6 JungleA).
+// (Driving slice: 1 Paris Prelude, 2 Deep Descent, 3 Island Infiltration, 5 Alpine Escape, 6 Enemies Vanquished).
 struct SpLevelRow {
     std::uint32_t sprite = 0;
     std::uint32_t name = 0;         // Txt label of the mission name

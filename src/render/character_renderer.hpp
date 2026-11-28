@@ -47,6 +47,13 @@ public:
               std::uint32_t hidden_part = 0, std::uint32_t attached_hash = 0,
               const Mat4& attached_matrix = Mat4{}, bool weapon_arm_only = false);
 
+    void draw_projected(const Mat4& view_projection, const Vec3& view_right, const Vec3& view_up,
+                        const SkinDef& skin, const Palette& palette, const Mat4& model,
+                        unsigned sleeve = 0, const std::vector<float>& facial = {},
+                        const CharacterLighting& lighting = {}, std::uint32_t hidden_part = 0,
+                        std::uint32_t attached_hash = 0, const Mat4& attached_matrix = Mat4{},
+                        bool weapon_arm_only = false);
+
     // Union of the bind-pose bounding boxes of the skin's meshes (skinned meshes and rigid parts).
     void bounds(const SkinDef& skin, unsigned sleeve, Vec3& lo, Vec3& hi);
 

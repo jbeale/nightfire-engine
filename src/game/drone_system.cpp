@@ -262,8 +262,18 @@ Drone& DroneSystem::spawn(SpawnInfo info) {
     d->smi.cur = d->smi.prev = d->smi.next = d->smi.saved = kStateGlobal;
     d->smi.entry_time = now();
 
-    if (const SkinDef* skin = bank_.skin(info.skin_hash))
+    if (const SkinDef* skin = bank_.skin(info.skin_hash)) {
         d->character = std::make_unique<CharacterInstance>(bank_, *skin);
+        const Skeleton* skeleton = bank_.skeleton(skin->skeleton);
+        // AnimObjectNew enables animation-driven height for the full character rigs.
+        if (!d->is_bot() && skeleton && skeleton->bone_count >= 0x47 && !skin->skinned.empty() && skin->scale[1] > 0.0f) {
+            if (const auto model = bank_.find_model(bank_.resolve_skinned(skin->skinned.front(), 0))) {
+                const float min_y = bank_.skinned_mesh(*model).bbox_min[1];
+                const float reference = skeleton->id == 1 ? -0.995208f : -1.160398f;
+                d->anim.height_offset = reference - min_y / skin->scale[1];
+            }
+        }
+    }
     if (nav_) {
         d->nav = std::make_unique<NavAgent>(*nav_);
         d->nav->set_path_for(d->nav_pos(), nav_->find_cel(d->nav_pos()));
@@ -434,6 +444,10 @@ void DroneSystem::tick(World&, FrameTiming timing) {
                 m.sent = m.deliver_at = now();
                 deliver(*d, m);
             }
+            continue;
+        }
+        if (d->riding_scripted_platform && d->alive()) {
+            anim_update(*d);
             continue;
         }
         pre_drone_control(*d);     // timers -> msgs 4/0xc/0xd

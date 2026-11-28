@@ -230,6 +230,7 @@ struct Frontend::Impl : ui::MenuHost {
     std::vector<WheelItem> ds_option_items() const;
     bool p_dossier(ui::Control&, const ui::Msg&);
     bool c_sb_dossier(ui::Control&, const ui::Msg&);
+    bool c_rb_ds_records(ui::Control&, const ui::Msg&);
     bool p_ds_weapons(ui::Control&, const ui::Msg&);
     bool p_ds_gadgets(ui::Control&, const ui::Msg&);
     bool c_sb_ds_weapons(ui::Control&, const ui::Msg&);

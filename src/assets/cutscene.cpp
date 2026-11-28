@@ -139,7 +139,7 @@ std::vector<ScriptCommand> decode_stream(CutsceneScript script) {
         }
         std::size_t size = fixed_payload(cmd.op);
         if (cmd.op == 7) {  // EntityStart: u32 + 5 bytes + u8-count x u32 + pad
-            size = 4 + 5 + 1;
+            size = 4 + 5;
         } else if (cmd.op == 18) {  // Event: u8 count + u8 id + count x u32
             const std::uint8_t count = c.u8();
             const std::uint8_t ev = c.u8();
@@ -158,13 +158,10 @@ std::vector<ScriptCommand> decode_stream(CutsceneScript script) {
         }
         for (std::size_t k = 0; k < size; ++k) cmd.payload.push_back(c.u8());
         if (cmd.op == 7) {
-            // The 5th byte counts extra dwords; they land before the pad byte.
             const std::uint8_t extra = cmd.payload[8];
-            const std::uint8_t pad = cmd.payload.back();
-            cmd.payload.pop_back();
             for (std::uint8_t k = 0; k < extra; ++k)
                 for (int b = 0; b < 4; ++b) cmd.payload.push_back(c.u8());
-            cmd.payload.push_back(pad);
+            cmd.payload.push_back(c.u8());  // pad follows all arguments
         }
         out.push_back(std::move(cmd));
     }

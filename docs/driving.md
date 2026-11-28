@@ -84,25 +84,24 @@ matrices; the original is left-handed: right x up = forward).
 1. **Instances.** The `Map ` group's `in` #0 array holds one 0x40-byte row-major matrix per instance (rows =
    X/Y/Z axes, row 3 = translation; Paris 2552, Alps 3689). Word `+0x1C` is `{u16 idx, "sr"}`: the group's `sr`
    string `CARP::<article>::{as  NNNN}` names the article and part.
-2. **Article bounding box.** `Base` holds `min xyz` at `+0x10` and `max xyz` at `+0x20` (floats). Chain
-   positions are quantised over it.
+2. **Article bounding box.** `Base` holds `min xyz` at `+0x10` and `max xyz` at `+0x20` (floats).
 3. **Part -> model.** The article's `as` member (payload ends in `{u16 idx, "sr"}`) points at an `sr` string
-   `EAGL::<article>::{as  0000}::Model[0].NN` = symbol `__Model:::...`. The slot is preceded by the model
-   header (found as the nearest block below the slot whose words `+0` and `+0x18` are pointers, `+0x18` pointing
-   at a list head): `+0x0C` = segment index `idx`, `+0x18` = list. Lists are runs of segments
-   `{u32 0xA0000000, 0, n}` + `n/2 x {0xA000FFFF, chain*}`; the part draws segment `idx` counted from the
-   list (parts beyond the list draw nothing: unused LOD slots).
+   `EAGL::<article>::{as  0000}::Model[0].NN` = symbol `__Model:::...`. The loader matches this model name
+   to the corresponding GeoPrim chains. A numbered variant can reuse the `.00` chains when both model
+   slots point at the same object. Draw-list segments have the form `{u32 0xA0000000, 0, n}` +
+   `n/2 x {0xA000FFFF, chain*}`.
 4. **Chain** (`chain*`: `{GeoPrim*, 0, DMA tag}`): a VIF stream ending in a `ret` DMA tag (qwc at `+8`). Unpacks:
    `V4-32 x1` header (`x` = vertex count `n`), three `V4-8 x1` quads holding the cumulative strip ends
    (`byte / 3`, terminated by 0; the last strip runs to `n`), `V3-16 x n` positions
-   (`min + (q + 32768) / 65535 * (max - min)`), `V2-16 x n` texture coordinates (`(v - 0x8000) / 256`), and
-   optionally `V3-8 x n` vertex colours (`0x80` = 1.0). Strips are plain triangle strips.
-   The GeoPrim object's name string (`+0x14`) reads `__GPRenderMethod_<article>::{as  AAAA}::Model[0].00_<ord>_name`.
+   (`(uint16(q) - 0x8000) / 256` metres), `V2-16 x n` texture coordinates (`(v - 0x8000) / 256`), and
+   optionally `V3-8 x n` vertex colours (`0x80` = 1.0). See `primtype` for the triangle topology.
+   The GeoPrim object's name string (`+0x14`) reads `__GPRenderMethod_<article>::{as  AAAA}::Model[0].NN_<ord>_name`.
 5. **Material state.** The chain preamble (VIF packet at `*GeoPrim`, ending at the GeoPrim) only carries changes:
    a pointer to the TAR texture object (defined symbol `{T0@hash}TEX0::name`, shape name from
    `nf::tar_shape_name`) and a `GeoPrimState` symbol (`alphatest=on`, `texalpha=...`, `cull`, `primtype`). The
    draw lists replay chains in order, so a chain without its own binding **inherits the previous chain's**
    (lists scanned in address order). Textures resolve through the `sn` shape pool (`docs/driving-textures.md`).
+   The loader uses cutout alpha for `1bitA`, blend alpha for `deepA`, and suppresses textures for `texture=off`.
 
 Unverified: the exact fixed-point scale of the track texture coordinates (`1/256` gives crisp road and building
 textures; the vehicle scale below is different, so the scale probably depends on the material's microcode:
@@ -234,13 +233,13 @@ track mesh and collision set and decodes every vehicle model (0 failures).
  | `Lighting/<track>.tun` | `AmbientSky{World}` (0..1 RGB) | global diffuse tint multiplying texture × vertex colour |
  
  `FogColour` holds four values `A,R,G,B` (e.g. Paris `255,22,15,20` = near-black
- night haze; underwater `128,32,66,130` = steel blue). The snow tracks pack red
- with alpha into channel 1 (`-13488856` = `0xFF322D28` → `(50,45,40)`,
- `-6909784` = `0xFF9690A8` → `(150,144,168)`), which the loader unpacks;
- PCSX2 alps2 is blue-grey overcast, matching the packed bytes [INFERENCE].
- Sky-dome/celestial batches (`sky*`, `moon` shapes)
- are drawn unfogged [INFERENCE: `RSky_Draw` exists but its pseudocode is only flag
- clearing; the domes are ordinary instances]. Values: Paris end 1450 m, Alps 251 m,
+ night haze; underwater `128,32,66,130` = steel blue). The snow tracks use a
+ packed RGBA word in channel 1. MIS3's `0xFF322D28` reads as `(40,45,50)` with red
+ in the low byte. The green and blue bytes agree with the two text channels.
+ Alpine Escape draws its authored sky domes around the camera with a separate
+ depth pass. Its lighting uses the authored `Light1{World}` direction and local
+ light pools at the lamp placements. Lamp falloff and sled headlight and
+ contact shadow are approximations. Values: Paris end 1450 m, Alps 251 m,
  Alps2/Race 551 m, underwater 251 m, jungle1 400 m, jungle2 2000 m, jungle3 1200 m
  (all start 1 m). `CarRender/default.tun` (`Skyblend`, `Skybright`: vehicle
  environment mapping) is not implemented yet.

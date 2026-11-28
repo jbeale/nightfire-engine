@@ -189,6 +189,7 @@ public:
     void update(const HudState& state);
     // Sprite layers are drawn in ascending order, like `View_DrawSprites`.
     void draw(ui::Renderer& renderer, ui::TextRenderer& text) const;
+    void draw_subtitle(ui::Renderer& renderer, ui::TextRenderer& text) const;
     // Canvas placement of the viewer and its panes for a canvas `canvas_width` wide (Renderer::canvas_width).
     HudGeometry geometry(float canvas_width) const;
 

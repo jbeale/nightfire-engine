@@ -300,6 +300,7 @@ void NetworkSession::send_inputs(std::span<const nf::PadState> pads, std::uint32
         input.buttons = pads[local].buttons;
         input.sticks = {pads[local].rx, pads[local].ry, pads[local].lx, pads[local].ly};
         input.local_player = std::uint8_t(local);
+        input.mouse = pads[local].mouse;
         for (std::size_t age = std::min<std::size_t>(s.input_history_count, nf::net::kInputRedundancy - 1);
              age > 0; --age)
             s.input_history[local][age] = s.input_history[local][age - 1];

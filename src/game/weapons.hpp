@@ -49,6 +49,7 @@ struct ImpactEvent {
     int weapon;
     bool on_body;              // hit a player / target (blood) instead of the world
     int shooter;
+    std::size_t placement = SIZE_MAX;   // static or moving surface hit by the trace
 };
 struct ExplosionEvent {
     Vec3 position;
@@ -61,7 +62,10 @@ struct WeaponEvents {
     std::vector<SoundEvent> sounds;
     std::vector<ImpactEvent> impacts;
     std::vector<ExplosionEvent> explosions;
-    void clear() { sounds.clear(), impacts.clear(), explosions.clear(); }
+    std::vector<int> player_shots;
+    struct Beam { Vec3 from, to; };
+    std::vector<Beam> beams;
+    void clear() { sounds.clear(); impacts.clear(); explosions.clear(); player_shots.clear(); beams.clear(); }
 };
 
 // Per-player weapon state (BLData weapon fields + obj220 weapon bytes + the weapon anim object).
@@ -139,6 +143,7 @@ public:
     ~WeaponSystem() override;
 
     const WeaponTable& table() const { return table_; }
+    const Projectile* guided_projectile(int owner) const;
     DamageTuning& tuning() { return tuning_; }
     AutoaimTuning& autoaim() { return autoaim_; }
     void set_autoaim(AutoaimTuning t) { autoaim_ = t; }   // from TuningVars.txt (GLOBAL + level section)
@@ -266,6 +271,7 @@ private:
         DamageTarget* target = nullptr;
         int part = bodypart::kNone;
         std::size_t scenery = SIZE_MAX;
+        std::size_t placement = SIZE_MAX;
     };
 
     void ensure_player(int slot, World& world);
@@ -306,7 +312,6 @@ private:
     void spawn_projectile(const Shooter& shooter, const WeaponDef& def);
     void step_projectiles(World& world, FrameTiming timing);
     bool step_projectile(Projectile& b, World& world, FrameTiming timing, const std::vector<Victim>& victims);
-    Projectile* find_guided(int owner);              // live guided (F2 & 0x4) projectile of `owner`, if any
     void detonate_owned(int owner, int weapon_id);  // explode every live projectile of the pair (detonators)
     void update_owner_locks(World& world);           // guided / weapon-lock projectiles freeze their owner
     SegmentHit trace_segment(const World& world, const Vec3& from, const Vec3& to, int owner,

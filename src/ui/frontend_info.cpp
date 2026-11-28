@@ -25,6 +25,7 @@ constexpr std::uint32_t kPageMain = 0x40000002, kPageStart = 0x40000009, kPageCr
 constexpr std::uint32_t kDsWheel = 0x1000010C, kDsRows = 0x1000010D, kDsImage = 0x1000010A, kDsDesc = 0x100001ED,
                         kDsFader = 0x1000010B;
 constexpr std::uint32_t kDsPages[4] = {0x4000003A, 0x4000003B, 0x4000003C, 0x4000003D};
+constexpr std::uint32_t kDsRecordsSelector = 0x10000174;
 // P_NFRESULTS labels.
 constexpr std::uint32_t kScoreLine = 0x10000167, kNameLine = 0x100001D1, kSubLine = 0x1000002B,
                         kNextLine = 0x10000168, kMedalPic = 0x10000166;
@@ -141,21 +142,36 @@ bool Frontend::Impl::c_sb_ds_gadgets(ui::Control& c, const ui::Msg& m) {
     return true;
 }
 
-// P_DSRECORDS / P_DSREWARDS: pre-formatted rows from DossierInfo into the page list.
+// P_DSRECORDS uses a mission radio and labels for the selected mission's record.
 bool Frontend::Impl::p_ds_records(ui::Control&, const ui::Msg& m) {
-    if (m.type == kPageShown && !dossier.records.empty()) {
-        send(0x10000176, kClear);
-        for (const auto& [name, value] : dossier.records)
-            mgr->send(0x10000176, kAddItem, name + "  " + value, 0);
+    if (m.type == kPageShown && sp_data) {
+        send(kDsRecordsSelector, kClear);
+        for (const auto& item : sp_data->levels) send(kDsRecordsSelector, kAddItemLabel, item.name, item.value);
+        send(kDsRecordsSelector, kSelectValue, dossier.mission_level);
     }
     return true;
 }
 
+bool Frontend::Impl::c_rb_ds_records(ui::Control& control, const ui::Msg& m) {
+    if (control.page.id != kDsPages[0] || m.type != kValueChanged) return true;
+    const auto selected = std::uint32_t(send(kDsRecordsSelector, kGetValue));
+    const auto record = std::find_if(profile.levels.begin(), profile.levels.end(),
+                                     [&](const ProfileLevel& level) { return level.level_id == selected; });
+    const int medal = record == profile.levels.end() ? 0 : std::clamp(record->medal, 0, 4);
+    set_text(0x10000175, std::to_string(profile.best_score(selected)));
+    send(0x10000176, kSetSprite, kCampaignMedalSprites[medal]);
+    send(0x10000176, kSetFlags, medal ? 2 : 1);
+    send(0x100001F8, kSetFlags, medal ? 2 : 1);
+    if (medal) set_label(0x100001F8, 0x30a - medal);
+    return true;
+}
+
 bool Frontend::Impl::p_ds_rewards(ui::Control&, const ui::Msg& m) {
-    if (m.type == kPageShown && !dossier.rewards.empty()) {
-        send(0x10000177, kClear);
-        for (const auto& [name, value] : dossier.rewards)
-            mgr->send(0x10000177, kAddItem, name + "  " + value, 0);
+    if (m.type == kPageShown && sp_data) {
+        constexpr std::uint32_t selector = 0x1000017a;
+        send(selector, kClear);
+        for (const auto& item : sp_data->levels) send(selector, kAddItemLabel, item.name, item.value);
+        send(selector, kSelectValue, dossier.mission_level);
     }
     return true;
 }
@@ -172,10 +188,16 @@ bool Frontend::Impl::p_nf_results(ui::Control&, const ui::Msg& m) {
     } else if (m.type == kAccept) {
         if (mission_results.bonus_kind != 0)
             change_page_close_iris(kPageBonus, 0x1000010B);
+        else if (mission_results.leads_to_wingame)
+            change_page_close_iris(kPageWingame, 0x1000010B);
         else {
             result.action = FrontendResult::Action::MissionDone;
             closed = true;
         }
+    } else if (m.type == kBack) {
+        change_page(kPageDossier, 0);
+    } else if (m.type == kAlt) {
+        change_page(kPageStats, 0);
     }
     return true;
 }
@@ -198,11 +220,13 @@ bool Frontend::Impl::p_nf_bonus(ui::Control&, const ui::Msg& m) {
     } else if (m.type == kAccept) {
         if (mission_results.leads_to_wingame)
             change_page_close_iris(kPageWingame, 0x1000010B);
-        else
-            change_page_close_iris(kPageNfMap, 0x1000010B);
+        else {
+            result.action = FrontendResult::Action::MissionDone;
+            closed = true;
+        }
     } else if (m.type == kBack) {
         change_page_close_iris(kPageDossier, 0x1000010B);
-    } else if (m.type == 0x5E) {
+    } else if (m.type == kAlt) {
         change_page_close_iris(kPageStats, 0x1000010B);
     }
     return true;
@@ -441,11 +465,13 @@ void Frontend::Impl::assign_credit_row(unsigned slot, const CreditRow& row) {
 
 void Frontend::Impl::register_info_handlers() {
     handlers[kPageDossier] = &Impl::p_dossier;
+    handlers[kDsWheel] = &Impl::c_sb_dossier;
     handlers[0x4000003D] = &Impl::p_ds_weapons;
     handlers[0x10000173] = &Impl::c_sb_ds_weapons;
     handlers[0x4000003C] = &Impl::p_ds_gadgets;
     handlers[0x1000016F] = &Impl::c_sb_ds_gadgets;
     handlers[0x4000003A] = &Impl::p_ds_records;
+    handlers[kDsRecordsSelector] = &Impl::c_rb_ds_records;
     handlers[0x4000003B] = &Impl::p_ds_rewards;
     handlers[kPageResults] = &Impl::p_nf_results;
     handlers[kPageStats] = &Impl::p_nf_stats;

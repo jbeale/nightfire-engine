@@ -3,7 +3,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "assets/level.hpp"
@@ -46,6 +48,15 @@ public:
     // cel+0x90 (kNoWater for kNone).
     float water_level(int room) const;
 
+    // Opt in rooms whose overlapping geometry needs portal selection. Other rooms retain
+    // the existing bounds-based behavior until their room links have been checked.
+    void enable_portal_geometry(std::string_view room);
+    void hide_room_overlap(std::string_view room, std::string_view overlap);
+    std::vector<std::size_t> blocked_geometry(const CollisionWorld& world, const Vec3& from,
+                                              const Vec3& to, float radius, int tracked_room = kNone) const;
+    std::vector<std::size_t> hidden_geometry(const CollisionWorld& world, const Vec3& eye, const Mat4& vp,
+                                             int tracked_room = kNone) const;
+
     // Tools / tests.
     const std::string& name(int room) const { return rooms_.at(std::size_t(room)).name; }
     std::uint32_t flags(int room) const { return rooms_.at(std::size_t(room)).flags; }
@@ -65,9 +76,14 @@ private:
         std::size_t placement;   // index into Level::placements(): where the collision of this room lives
         Vec3 min, max;
         float water;
+        bool portal_geometry = false;
+        std::optional<std::size_t> hidden_overlap;
+        std::vector<std::size_t> linked_geometry;
         std::vector<Portal> portals;   // in the order Cel_ObjectLeftCel visits them (last built first)
     };
     bool crosses_portal(const Portal& portal, const Vec3& from, const Vec3& to) const;
+    int portal_geometry_room(const CollisionWorld& world, const Vec3& p, int tracked_room) const;
+    std::vector<std::size_t> omitted_placements(const std::vector<bool>& reached) const;
 
     std::vector<Room> rooms_;   // file order; the original's cel list is walked from the back
 };

@@ -103,6 +103,7 @@ public:
     void render(std::int16_t* out, std::size_t frames);  // interleaved L,R
     bool open_device();                                  // false (last_error()) without a device
     void close_device();
+    void set_paused(bool paused);
     const std::string& last_error() const;
 
 private:

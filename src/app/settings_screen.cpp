@@ -64,6 +64,11 @@ const std::vector<Category>& categories() {
           {"Team Colours", "Orange and sky blue teams, with triangle and square radar markers.",
            {"Original", "Colour-blind Safe"}, [](const AppConfig& c) { return int(c.colorblind_teams); },
            [](AppConfig& c, int v) { c.colorblind_teams = v != 0; }}}},
+        {"Controls", nullptr,
+         {{"Mouse Sensitivity", "Adjust mouse look speed, including when steering a guided missile.",
+           {"50%", "100%", "150%", "200%", "250%", "300%", "350%", "400%"},
+           [](const AppConfig& c) { return c.mouse_look_sensitivity / 50 - 1; },
+           [](AppConfig& c, int v) { c.mouse_look_sensitivity = (v + 1) * 50; }}}},
     };
     return list;
 }
@@ -118,8 +123,9 @@ void draw(const AppContext& ctx, const MenuBackground& background, Window& windo
         const bool current = i == st.category;
         if (current)
             page.selection({list.x + 8.0f, y + 2.0f, list.w - 16.0f, kCategoryPitch - 4.0f});
-        page.art("settings", cats[std::size_t(i)].icon, list.x + 12.0f, y + 3.0f,
-                 current ? 0x7F7F7FFF : 0x7F7F7FB0);
+        if (const char* icon = cats[std::size_t(i)].icon)
+            page.art("settings", icon, list.x + 12.0f, y + 3.0f,
+                     current ? 0x7F7F7FFF : 0x7F7F7FB0);
         page.label({list.x + 12.0f + 22.0f * kArtAspect + 8.0f, y, list.w - 60.0f, kCategoryPitch},
                    cats[std::size_t(i)].name, 2, ui::Align::Left, current ? kLabelColor : kItemColor);
     }
@@ -172,7 +178,6 @@ void draw(const AppContext& ctx, const MenuBackground& background, Window& windo
     }
     page.prompts(st.in_page ? "~A Select  ~V Scroll  ~H Change  ~X Back" : "~A Select  ~V Scroll  ~X Back");
     renderer.end();
-    window.swap();
 }
 
 // One input; returns false when the screen closes.
@@ -290,6 +295,7 @@ void run_settings(const AppContext& ctx, Window& window, ui::Renderer& renderer,
             ++st.frame;
         }
         draw(ctx, background, window, renderer, text, cfg, st);
+        window.swap();
         SDL_Delay(16);
     }
     if (gamepad) SDL_CloseGamepad(gamepad);

@@ -29,6 +29,7 @@
 namespace nf {
 
 class Player;
+class CutscenePlayer;
 class WeaponSystem;
 enum class DamageType : std::uint8_t;
 struct WeaponEvents;
@@ -89,6 +90,8 @@ struct TriggerObject {
     std::uint16_t type = 2;        // +56: 1 gate, 2 touch latch, 3 AND, 4 sequence, 5 fan-out, 10 activate, 12 OR, 13 load
     std::uint32_t out_channel = 0;  // +32 = param 48
     std::uint16_t gate_channel = 0;  // +36 = param 52 (0 = always armed)
+    std::uint16_t disable_channel = 0;  // Trigger_Update suppression channel
+    std::uint16_t touch_mask = 8;   // Trigger_Hit: player 8, drone 0x10
     std::uint16_t inputs[8]{};      // +38.. = params 52/56/... (multiplex inputs)
     std::uint16_t cooldown = 0;      // +60 countdown
     std::uint16_t extra = 0;        // +58 (movie id / level id low word for LoadLevel/MoviePlayer)
@@ -110,6 +113,9 @@ struct DoorObject {
     std::uint16_t lock_channel = 0;
     std::uint16_t group = 0;
     std::uint16_t open_sound = 0, close_sound = 0, locked_sound = 0;
+    std::uint16_t open_signal = 0, cut_signal = 0; // signal-operated track / laser lock
+    bool signal_driven = false, laser_lock = false;
+    float lock_heat = 0, cooling_delay = 0;
     float progress = 0;      // +80: 0 closed .. 1 open (`Door_Interp`)
     float rate = 0;          // +84: 1 / param 4 (or 1 / FRAME_RATE)
     float direction = 1;     // +88: +1 opening, -1 closing
@@ -121,6 +127,7 @@ struct DoorObject {
     std::uint16_t path_index = 0;  // spline path when !swing
     bool has_path = false;
     bool auto_door = false;  // opens on proximity (`obj+244 & 2`, data: p0 = 2)
+    bool hold_open = false;  // Door_Update flags 0x20 skips the idle close timer
     std::uint16_t flags = 0;        // param 0 (door mode bits)
     float idle_frames = 0;          // open frames with nobody near (auto-close)
     std::array<float, 3> last_max{};  // mover displacement tracking
@@ -139,7 +146,15 @@ struct SoundRequest {
 
 class SpObjects {
 public:
-    SpObjects(Level& level, std::uint32_t level_id, sp::SwitchChannels& channels);
+    struct DynamicBlocker {
+        std::size_t placement;
+        std::uint16_t show_channel, hide_channel;
+        bool reversible;
+        bool visible;
+        bool removed = false;
+    };
+
+    SpObjects(Level& level, std::uint32_t level_id, sp::SwitchChannels& channels, int difficulty = 2);
 
     // Build from the map statics (classes above; everything else is ignored here).
     void build();
@@ -167,6 +182,8 @@ public:
         std::size_t placement = 0;
         std::array<float, 16> transform{};  // model -> world, column-major
         bool hide = false;                  // broken/removed: skip the static draw
+        std::size_t model = SIZE_MAX;
+        Vec3 tint{1, 1, 1};
     };
     struct ThirdCamAnchor {  // `ThirdCam_Create` (231): script-camera anchor by id
         std::size_t placement = 0;
@@ -177,6 +194,8 @@ public:
         std::uint32_t hash = 0;
         bool auto_play = false;  // param 2 == 1: play at level start
         std::uint16_t trigger_channel = 0;  // param 6: play on rising edge
+        bool preload = false;  // param 2: load and pose before the trigger
+        CutscenePlayer* staged = nullptr;
         bool started = false;
     };
     // One live script entity (`Script_CreateEntity`): model hash + interpolated key pose.
@@ -197,9 +216,11 @@ public:
     const std::vector<DrawOverride>& draws() const { return draws_; }
     unsigned take_bond_pickups() { const auto count = bond_pickups_; bond_pickups_ = 0; return count; }
     std::optional<Vec3> update_searchlights(const std::vector<Toucher>& touchers, const CollisionWorld& world,
-                                           float frames);
+                                           float frames, const CollisionWorld* moving = nullptr);
     // Placements the static draw pass must skip this frame (taken over by draws_).
     const std::vector<std::size_t>& hides() const { return hides_; }
+    void hide_placement(std::size_t placement) { hides_.push_back(placement); }
+    const std::vector<DynamicBlocker>& dynamic_blockers() const { return dynamic_blockers_; }
     const std::vector<ThirdCamAnchor>& thirdcams() const { return thirdcams_; }
     const std::vector<ScriptPlayerAnchor>& script_players() const { return script_players_; }
     std::vector<ScriptPlayerAnchor>& script_players() { return script_players_; }
@@ -237,7 +258,6 @@ public:
     };
     Census census() const;
 
-private:
     struct Breakable {
         std::size_t placement = 0;
         float hp = 50;
@@ -246,7 +266,12 @@ private:
         bool broken = false;
         std::array<float, 3> center{};
         float radius = 1;
+        std::size_t damaged_model = SIZE_MAX;
+        bool precise_hits = false;
     };
+    const std::vector<Breakable>& breakables() const { return breakables_; }
+
+private:
     struct Sensor {
         std::size_t placement = 0;
         std::uint16_t alarm_channel = 0, gate_channel = 0;
@@ -277,7 +302,8 @@ private:
         std::size_t placement = 0;
         std::uint16_t channel = 0, gate = 0;
         std::uint16_t out = 0;  // Lock/Monitor/FuseBox unlock channel (param 1)
-        std::uint16_t label = 0, sound = 0;  // Hint text + sound (params 0/1)
+        std::uint32_t label = 0;
+        std::uint16_t sound = 0, disable = 0;  // Hint sound and disable channel
         std::uint32_t event = 0;             // MusicTrigger event id (param 2)
         bool fired = false;                  // one-shot latches (Hint/SoundTrigger)
     };
@@ -308,6 +334,7 @@ private:
 
     Level& level_;
     std::uint32_t level_id_ = 0;
+    int difficulty_;
     sp::SwitchChannels& channels_;
     CollisionWorld trigger_volumes_;
     std::vector<TriggerObject> triggers_;
@@ -328,6 +355,7 @@ private:
     std::vector<Mover> movers_;
     std::vector<DrawOverride> draws_;
     std::vector<std::size_t> hides_;  // placements the static pass must skip (doors/rotors/broken/taken)
+    std::vector<DynamicBlocker> dynamic_blockers_;
     std::vector<SoundRequest> sounds_;
     std::vector<std::uint32_t> music_;
     std::vector<Text> texts_;

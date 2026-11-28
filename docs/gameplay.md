@@ -119,7 +119,7 @@ nightfire <gamedir> [--mission level.bin] [--mp ...] [--logic-hz 30|60] [--drive
 | Device | Mapping |
 |--------|---------|
 | keyboard | W/S (or Up/Down) walk, A/D strafe, Left/Right turn, PageUp/PageDown look, Space = Triangle (jump), C / Left Ctrl = L2 (crouch), Left mouse = Cross (fire), K collision wireframe |
-| mouse | click to capture; motion -> yaw/pitch stick deflection (4 stick units per pixel per tick, bypasses the dead zone); Esc releases, then quits |
+| mouse | click to capture; relative motion rotates the view directly at 0.035 degrees per pixel at 100% sensitivity; Esc releases, then quits |
 | gamepad (SDL) | left stick walk/strafe, right stick turn/look (the DS2 default puts strafe and turn on different sticks; nfgame swaps X so it behaves like a modern shooter), A = jump, B or left trigger = crouch, right trigger = Cross, X/Y = Square/Circle, bumpers L1/R1, D-pad, Start, Back = Select |
 
 The simulation advances at 60 Hz by default; `--logic-hz 30` selects a fixed 30-Hz step for comparison.

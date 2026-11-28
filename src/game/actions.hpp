@@ -66,6 +66,7 @@ public:
     void update(const PadState& pad, const InputTables& tables, const PlayerSettings& settings, int player = 0);
 
     float actionf(int action) const { return value_[action]; }            // Input_Actionf
+    MouseLook mouse_look() const { return mouse_; }
     bool held(int action) const { return (flags_[action] & 1) != 0; }      // Input_Action(.., 1)
     bool pressed(int action) const { return (flags_[action] & 4) != 0; }   // Input_Action(.., 4)
 
@@ -76,6 +77,9 @@ public:
     std::array<float, kActionCount> value_{};
     std::array<std::uint8_t, kActionCount> flags_{};
     std::array<std::uint16_t, kActionCount> hold_{};
+
+private:
+    MouseLook mouse_{};
 };
 
 }  // namespace nf

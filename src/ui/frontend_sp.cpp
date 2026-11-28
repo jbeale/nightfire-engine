@@ -35,12 +35,16 @@ std::vector<Frontend::Impl::WheelItem> Frontend::Impl::sp_level_items() const {
     std::vector<WheelItem> items = wheel_items(sp_data->levels);
     // Campaign unlocks (fresh saves open the first two missions): completed missions stay open
     // and so does the mission after the furthest completed one (table order = campaign order).
-    int furthest = 1;
-    for (std::size_t i = 0; i < sp_data->levels.size(); ++i)
-        if (profile.completed(sp_data->levels[i].value)) furthest = std::max(furthest, int(i) + 1);
-    for (std::size_t i = 0; i < items.size() && i <= std::size_t(furthest); ++i) items[i].enabled = true;
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        items[i].enabled = items[i].enabled || (profile.status & (1u << i));
+        if (profile.completed(items[i].value)) {
+            items[i].enabled = true;
+            if (i + 1 < items.size()) items[i + 1].enabled = true;
+        }
+    }
     return items;
 }
+void Frontend::set_mission_difficulty(int difficulty) { impl_->sp_difficulty = difficulty; }
 std::vector<Frontend::Impl::WheelItem> Frontend::Impl::difficulty_items() const { return wheel_items(sp_data->difficulties); }
 
 // Menu_UpdateCodenameWheel: the five names around the current row, the "new codename" / "codename" picture and
@@ -156,12 +160,17 @@ bool Frontend::Impl::p_nf_map(ui::Control&, const ui::Msg& m) {
         set_label(kMapHeader, 0x208);
         // The wheel starts on the last unlocked mission.
         int last = 0;
-        for (std::size_t i = 0; i < sp_data->levels.size(); ++i)
-            if (sp_data->levels[i].enabled) last = int(i);
+        const auto items = sp_level_items();
+        for (std::size_t i = 0; i < items.size(); ++i)
+            if (items[i].enabled) last = int(i);
         send(kMapScroll, kScrollSet, 0);
         send(kMapScroll, kScrollSet, std::uint32_t(last));
     } else if (m.type == kIdle) {
         iris_play(true, kMapIris);
+    } else if (m.type == kBackVeto && !mgr->has_page_history()) {
+        // Results can open the mission wheel as the first page.
+        change_page(kPageMain, 1);
+        m.veto = true;
     }
     return true;
 }

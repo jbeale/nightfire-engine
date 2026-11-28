@@ -13,6 +13,8 @@
 
 namespace nf {
 
+class RoomMap;
+
 // Static-level collision, a port of ACTION.ELF's Collide_* / Intersect_* family.
 //
 // The original runs every query as a HITTEST record (see docs/gameplay.md "Collision"): a ray,
@@ -59,6 +61,7 @@ struct CylinderQuery {
     // Placement (Level::placements() index) whose collision is skipped: HITTEST+0x78, the object the
     // capsule must ignore (Player_CollWire stores the wire it hangs on there).
     std::size_t ignore = SIZE_MAX;
+    int tracked_room = -1;  // player cel for queries in overlapping room bounds
 };
 
 struct CylinderResult {
@@ -116,7 +119,9 @@ public:
     CollisionWorld& operator=(CollisionWorld&&) noexcept;
 
     // Collide_RayIntersect: all hits of the segment from->to, ascending by distance (empty = none).
-    std::vector<CollisionHit> ray_hits(const Vec3& from, const Vec3& to, unsigned pick, unsigned hit = 0) const;
+    std::vector<CollisionHit> ray_hits(const Vec3& from, const Vec3& to, unsigned pick, unsigned hit = 0,
+                                       bool use_portals = true) const;
+    void set_room_map(const RoomMap& rooms) { rooms_ = &rooms; }
     std::optional<CollisionHit> ray(const Vec3& from, const Vec3& to, unsigned pick, unsigned hit = 0) const;
 
     // Collide_LineOfSight: true when nothing blocks the segment (pick | 4, hit = kFirstHit).
@@ -151,7 +156,9 @@ public:
     // Replace a dynamic prop's collision at its authored transform.
     void set_object_model(const Level& level, std::size_t placement, std::size_t model);
     void add_model(const Level& level, std::size_t handle, std::size_t chunk, std::size_t model, const Mat4& transform);
+    void add_floor(std::size_t handle, const Mat4& transform, const Vec3& min, const Vec3& max);
     void move_model(std::size_t handle, const Mat4& transform);
+    void set_model_enabled(std::size_t handle, bool enabled);
     Vec3 carry_point(std::size_t handle, const Mat4& next, const Vec3& point) const;
 
     // Instrumentation for tools.
@@ -167,6 +174,7 @@ private:
     struct Item;
     static bool set_transform(Item& item, const Mat4& transform);
     std::vector<Item> items_;
+    const RoomMap* rooms_ = nullptr;
     Stats stats_;
 };
 

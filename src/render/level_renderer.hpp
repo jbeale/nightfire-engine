@@ -67,6 +67,7 @@ public:
     struct ObjectDraw {
         std::size_t chunk, model;
         Mat4 transform;
+        Vec3 tint{1, 1, 1};
     };
     void draw_objects(const Camera& cam, float aspect, const std::vector<ObjectDraw>& objects);
     // Placements the static pass skips (dynamic objects taken over by draw_objects: scripted
@@ -97,6 +98,7 @@ private:
         std::uint32_t slot = 0;    // sky slot (drawing order)
         bool sky = false;
         bool follows_eye = false;  // sky origin is the camera
+        Vec3 tint{1, 1, 1};
     };
 
     const GpuTexture* texture(std::size_t chunk, std::int32_t index);
@@ -111,6 +113,7 @@ private:
     std::filesystem::path texture_override_dir_;
     GLuint program_ = 0;
     GLint u_mvp_ = -1, u_atest_ = -1, u_aref_ = -1, u_fog_color_ = -1, u_fog_start_ = -1;
+    GLint u_tint_ = -1;
     GpuTexture white_;
     float far_ = 2000.0f;
     std::uint64_t ticks_ = 0;

@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <string>
 
 #include <utility>
@@ -20,6 +21,7 @@ int main() {
     PadInput input{0x10203040, 0xa55a, {0, 127, 128, 255}}, decoded_input;
     input.view_tick = 0x55667788;
     input.local_player = 2;
+    input.mouse = {-0.003125f, 0.011875f};
     const auto input_bytes = encode_input(input);
     ok &= check(decode_input(input_bytes, decoded_input), "input decode");
     ok &= check(decoded_input.tick == input.tick && decoded_input.buttons == input.buttons &&
@@ -27,7 +29,11 @@ int main() {
                 "input round-trip");
     ok &= check(decoded_input.view_tick == input.view_tick && decoded_input.local_player == input.local_player,
                 "input owner/view round-trip");
+    ok &= check(decoded_input.mouse.yaw == input.mouse.yaw && decoded_input.mouse.pitch == input.mouse.pitch,
+                "mouse rotation round-trip");
     ok &= check(!decode_input(std::span(input_bytes).first(9), decoded_input), "truncated input rejection");
+    input.mouse.pitch = std::numeric_limits<float>::quiet_NaN();
+    ok &= check(!decode_input(encode_input(input), decoded_input), "non-finite mouse rotation rejection");
     InputBatch batch;
     batch.count = 6;
     batch.samples = {PadInput{10, 1, {255, 128, 0, 128}}, PadInput{10, 2, {128, 128, 128, 128}},
@@ -38,6 +44,7 @@ int main() {
         batch.samples[age * 2 + 1].view_tick = std::uint32_t(10 - age);
         batch.samples[age * 2 + 1].local_player = 1;
     }
+    batch.samples[3].mouse.yaw = -0.03125f;
     InputBatch decoded_batch;
     ok &= check(decode_input_batch(encode_input_batch(batch), decoded_batch), "two-player redundant batch decode");
     ok &= check(decoded_batch.count == 6 && decoded_batch.samples[0].tick == 10 &&
@@ -45,6 +52,8 @@ int main() {
                 "two-player redundant input order and contents");
     ok &= check(decoded_batch.samples[0].view_tick == 10 && decoded_batch.samples[5].view_tick == 8,
                 "redundant shooter view ticks retained");
+    ok &= check(decoded_batch.samples[3].mouse.yaw == -0.03125f && !decoded_batch.samples[1].mouse.moved(),
+                "mouse deltas stay with their original player and tick");
     batch.samples[5].tick = 11;
     ok &= check(encode_input_batch(batch).empty(), "non-monotonic input batch rejection");
     batch.samples[5].tick = 8;

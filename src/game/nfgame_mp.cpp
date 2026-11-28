@@ -399,7 +399,8 @@ int run_match(const MatchLaunch& request) {
         while (accumulator >= kStep) {
             for (int i = 0; i < options.humans; ++i) prev[std::size_t(i)] = view_of(*world.player(i));
             PadInputs in{};
-            for (int i = 0; i < options.humans; ++i) in[std::size_t(i)] = pads[std::size_t(i)].sample();
+            for (int i = 0; i < options.humans; ++i)
+                in[std::size_t(i)] = pads[std::size_t(i)].sample(world.settings(i).invert_look);
             if (drone_renderer && bot_match) drone_renderer->capture_previous(bot_match->drones());
             session.tick(in, timing);
             weather.update(world.player(0)->eye(), timing.FRAME_RATE_MUL, timing.REC_FRAME_RATE,

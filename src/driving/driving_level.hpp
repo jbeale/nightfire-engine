@@ -28,12 +28,13 @@ const LevelDesc* find_level(std::string_view name);   // by name or archive name
 class DrivingLevel {
 public:
     // `gamedir` is the extraction directory holding DRIVING/*.VIV.
-    DrivingLevel(const std::filesystem::path& gamedir, const LevelDesc& desc);
+    DrivingLevel(const std::filesystem::path& gamedir, const LevelDesc& desc, std::span<DetachedTrackMesh> detached = {});
 
     const LevelDesc& desc() const { return desc_; }
     const CarpFile& carp() const { return *carp_; }
     const ElfImage& elf() const { return elf_; }
     const SceneMesh& track() const { return track_; }
+    const TrackRenderExtras& render_extras() const { return render_extras_; }
     // `.ssh` files of the track, in `sn` slot order, then the shared render libraries.
     const std::vector<SshFile>& shapes() const { return shapes_; }
     // Render tuning (`data\tuning\Render\Fog/<track>.tun`, `Lighting/<track>.tun`):
@@ -44,6 +45,8 @@ public:
     float fog_start() const { return fog_start_; }
     float fog_end() const { return fog_end_; }
     const Vec3& ambient() const { return ambient_; }
+    const Vec3& key_light_direction() const { return key_light_direction_; }
+    const Vec3& key_light_colour() const { return key_light_colour_; }
 
     BigArchive& archive() { return archive_; }
     bool has_file(std::string_view path) const { return archive_.find(path) != nullptr; }
@@ -62,10 +65,13 @@ private:
     std::unique_ptr<CarpFile> carp_;
     ElfImage elf_;
     SceneMesh track_;
+    TrackRenderExtras render_extras_;
     std::vector<SshFile> shapes_;
     Vec3 fog_colour_{0.6f, 0.65f, 0.7f};
     float fog_start_ = 400.0f, fog_end_ = 1500.0f;
     Vec3 ambient_{1.0f, 1.0f, 1.0f};
+    Vec3 key_light_direction_{0, 1, 0};
+    Vec3 key_light_colour_{};
 };
 
 }  // namespace nf::driving

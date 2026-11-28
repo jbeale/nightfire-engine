@@ -146,6 +146,7 @@ bool set_anim(Drone& d, int id, int blend) {
     a.loop = (in.flags & 1) != 0;
     a.applied = true;
     a.clip_running = false;
+    a.clip_end_event = false;
     if (a.script != 0 && d.character) {
         const bool ok = d.character->blend_to(a.script, float(blend), a.loop);
         a.clip_running = ok && !a.loop;
@@ -234,16 +235,12 @@ void anim_update(Drone& d) {
     if (!data) return;
     Drone::Anim& a = d.anim;
     d.mv.root_motion = {};
-    if (d.alive() || d.mv.disabled) {
-        d.death_start_root_height.reset();
-    } else if (!d.is_bot() && d.character && !d.death_start_root_height) {
-        d.death_start_root_height = d.character->root_height();
-    }
-    if (d.death_start_root_height && (d.smi.cur == kStateDead || d.smi.cur == kStateFade)) return;
+    if (!d.is_bot() && !d.alive() && !d.mv.disabled && (d.smi.cur == kStateDead || d.smi.cur == kStateFade)) return;
 
     // DroneAnim_CheckForAnimComplete / SetEndAnim: a non-looping clip finished -> chained anim, or complete.
-    if (a.clip_running && d.character && d.character->finished()) {
+    if (a.clip_running && d.character && (a.clip_end_event || d.character->finished())) {
         a.clip_running = false;
+        a.clip_end_event = false;
         if (!d.is_bot() && a.end_state == kStateDead) {
             // Hold the final death pose when its completion state is a corpse.
             a.next_anim = 0;
@@ -261,7 +258,10 @@ void anim_update(Drone& d) {
     }
 
     // DroneAnim_CanSetAnimCall + GetDAnimForCall + SetAnimCall: turn the pending request into a clip.
-    if (a.req_state != 0) {
+    // Let an in-progress campaign posture transition reach its next clip before another
+    // idle/aim/locomotion request can replace it. Reactions like impacts and death can interrupt.
+    const bool changing_posture = !d.is_bot() && a.cur_type == 5 && a.clip_running;
+    if (a.req_state != 0 && !(changing_posture && a.req_state <= kWalkLimp)) {
         int blend = a.req_blend, flag = 0;
         std::uint16_t id = data->anim_for(a.cur_state, a.req_state, a.req_variant, &blend, &flag);
         const auto can_play = [&](std::uint16_t anim) {
@@ -308,6 +308,16 @@ void anim_update(Drone& d) {
         return;
     }
     d.character->tick(d.sys->timing().FRAME_RATE_MUL);
+    if (a.height_offset && !d.mv.disabled) {
+        // DroneAnim_PreTransCallback moves the object by the change in its animation height.
+        // The extracted pose and collision capsule then share a root without raising the feet.
+        const float root_height = d.character->root_height();
+        if (root_height != 0.0f) {
+            const float height = std::max(0.2f, root_height + *a.height_offset);
+            d.pos[1] += height - d.mv.applied_height;
+            d.stand_height = d.mv.applied_height = height;
+        }
+    }
     if (source_gate) {
         apply_animation_root_motion(d, d.character->root_motion(), a.source_root_yaw);
         d.mv.root_motion = {};
@@ -325,7 +335,10 @@ void anim_update(Drone& d) {
             // DroneAnim_EventFunc 0x13b750
             switch (e.arg) {
                 case 6: d.send_self(kMsgAnimEvent); break;
-                case 7: a.clip_running = false; break;
+                case 7:
+                    if (d.is_bot()) a.clip_running = false;
+                    else a.clip_end_event = a.clip_running;
+                    break;
                 case 15: d.weapon_ready = true; break;                         // +0x20
                 case 16: d.weapon_ready = d.fire_window = false; break;        // +0x20/+0x21
                 case 18: d.weapon_ready = d.fire_window = true; break;

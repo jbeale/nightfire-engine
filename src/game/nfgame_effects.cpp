@@ -41,7 +41,15 @@ unsigned WeaponEffects::upload(std::uint32_t hash) {
 }
 
 void WeaponEffects::consume(const WeaponEvents& events) {
+    beams_ = events.beams;
     for (const ImpactEvent& i : events.impacts) {
+        if (i.weapon >= 0 && i.weapon < WeaponTable::kWeaponCount &&
+            (table_.weapon(i.weapon).flags2 & wf2::kLaserBeam) != 0) {
+            if (!i.on_body && puffs_.size() < 256)
+                puffs_.push_back({i.point + i.normal * .03f, {0, .08f, 0}, .05f, -.002f, 0, 10,
+                                  {1.0f, .55f, .05f, .9f}, table_.surface(i.surface).spark_gfx, true});
+            continue;
+        }
         if (i.on_body) {
             for (int k = 0; k < 3; ++k)
                 puffs_.push_back({i.point, jitter(0.06f) + i.normal * 0.03f, 0.12f, 0.004f, 0, 25,
@@ -83,6 +91,12 @@ void WeaponEffects::consume(const WeaponEvents& events) {
         }
     }
 }
+void WeaponEffects::emit_aircraft_smoke(const Vec3& position) {
+    if (puffs_.size() >= 256) return;
+    puffs_.push_back({position, {0, .04f, 0}, 1.25f, .025f, 0, 155,
+                      {.14f, .14f, .14f, .66f}, table_.surface(0).puff_gfx[0], false});
+}
+
 // `CutscenePlayer::Host` for effect scripts: sounds and lights drain via take_sounds()/take_lights();
 // channel/switch surface only; everything else is a no-op (no cameras, text, drones, fades in blasts).
 struct ExplosionHost : CutscenePlayer::Host {
@@ -278,6 +292,25 @@ std::vector<LevelRenderer::ObjectDraw> WeaponEffects::take_blast_draws(float int
     return out;
 }
 
+std::vector<LevelRenderer::ObjectDraw> WeaponEffects::projectile_draws(const std::vector<Projectile>& projectiles,
+                                                                      float interpolation,
+                                                                      const Projectile* camera_projectile) {
+    std::vector<LevelRenderer::ObjectDraw> out;
+    for (const auto& b : projectiles) {
+        const auto hash = table_.weapon(b.weapon).projectile_gfx;
+        if (&b == camera_projectile || (hash >> 24) != 0x02) continue;
+        const auto [chunk, model] = resolve_model(hash);
+        if (chunk == SIZE_MAX) continue;
+        Vec3 x = cross(Vec3{0, 1, 0}, b.dir);
+        x = length(x) > 1e-4f ? x * (1.0f / length(x)) : Vec3{1, 0, 0};
+        const Vec3 y = cross(b.dir, x);
+        const Vec3 p = b.previous_pos + (b.pos - b.previous_pos) * std::clamp(interpolation, 0.0f, 1.0f);
+        out.push_back({chunk, model, {x[0], x[1], x[2], 0, y[0], y[1], y[2], 0,
+                                     b.dir[0], b.dir[1], b.dir[2], 0, p[0], p[1], p[2], 1}});
+    }
+    return out;
+}
+
 std::vector<SoundEvent> WeaponEffects::take_blast_sounds() {
     std::vector<SoundEvent> out;
     out.swap(blast_sounds_);
@@ -334,6 +367,16 @@ void WeaponEffects::draw(const Camera& cam, float aspect, CharacterRenderer& cha
     glDepthFunc(GL_LESS);
     quads_.set_additive(true);
     glDepthMask(GL_FALSE);
+    for (const auto& beam : beams_) {
+        const Vec3 span = beam.to - beam.from;
+        const float size = length(span);
+        if (size < .001f) continue;
+        const Vec3 centre = (beam.from + beam.to) * .5f;
+        const Vec3 side = cross(span, centre - cam.eye);
+        const float width = length(side);
+        quads_.draw(vp, centre, width > .001f ? side * (1.0f / width) : r, span * (1.0f / size),
+                    .018f, size, {1.0f, .12f, .025f, .85f});
+    }
     for (const Projectile& b : projectiles) {
         const WeaponDef& def = table_.weapon(b.weapon);
         if ((def.flags2 & (wf2::kTracerAll | wf2::kTracer)) == 0) continue;

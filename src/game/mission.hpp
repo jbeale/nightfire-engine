@@ -19,9 +19,12 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "assets/cutscene.hpp"
@@ -37,6 +40,7 @@ namespace sp {
 class SpSystem;
 }
 class WeaponSystem;
+struct ImpactEvent;
 class CharacterBank;
 class CharacterInstance;
 class StringTable;
@@ -77,7 +81,12 @@ public:
     float fade() const { return fade_; }
     // Script-camera override for the renderer (eye + forward + fov), when a camera runs.
     std::optional<CutscenePlayer::Camera> script_camera() const;
+    const CutscenePlayer* skippable_cutscene() const;
+    void skip_cutscene(World& world, FrameTiming timing);
+    void finish_checkpoint_scene(World& world, std::uint32_t hash, FrameTiming timing);
     std::vector<CutscenePlayer::ActorPose> script_actors() const;
+    std::vector<CutscenePlayer::Sprite> script_sprites() const;
+    const std::vector<Placement>& script_models() const { return script_models_; }
     void set_character_bank(CharacterBank* bank) { character_bank_ = bank; }
     // Queued presentation (also delivered through Hooks): sounds, texts, music, drone spawns.
     struct Sound : CutscenePlayer::Sound {
@@ -105,6 +114,8 @@ public:
     std::vector<Music> take_music();
     std::vector<Spawn> take_spawns();
     std::vector<Light> take_lights();
+    std::optional<Vec3> take_copter_smoke();
+    bool hit_copter_hull(const ImpactEvent& impact) const;
     // Channel transitions since the last call (frame, channel, value): poll-based watch for
     // tracing objective drivers headless (e.g. which tick sets ch70 on 07000005).
     struct ChannelEvent {
@@ -172,8 +183,13 @@ public:
 private:
     void monitor_objectives();
     void update_state(FrameTiming timing);
-    void play_script(std::uint32_t hash);
+    CutscenePlayer* play_script(std::uint32_t hash, bool stage = false);
+    void start_ready_scripts(World& world);
+    void apply_script_locks(World& world);
+    void finish_cutscene(World& world, CutscenePlayer& scene, FrameTiming timing);
     void update_moving_geometry(World& world);
+    void update_script_models(World& world, const WeaponEvents& events);
+    void update_escape_copter(World& world, const WeaponEvents& events, FrameTiming timing);
 
     Level& level_;
     std::uint32_t level_id_ = 0;
@@ -200,14 +216,43 @@ private:
     bool spotlight_contact_ = false;
     std::vector<int> suspended_drones_;
     std::optional<CutscenePlayer::PlayerHandoff> player_handoff_;
+    bool fast_forwarding_ = false;
     std::vector<std::pair<std::uint32_t, CutsceneBin>> scripts_;
     std::vector<std::unique_ptr<CutscenePlayer>> players_;
     CharacterBank* character_bank_ = nullptr;
     std::unique_ptr<CharacterInstance> truck_;
     std::optional<CutscenePlayer::ActorPose> parked_truck_pose_;
     std::optional<std::size_t> truck_handle_;
+    std::optional<std::size_t> gondola_floor_handle_;
     CollisionWorld* moving_geometry_ = nullptr;
+    std::vector<Placement> script_models_;
+    struct ScriptCollider {
+        std::size_t handle;
+        bool active = false;
+        std::optional<float> health;
+    };
+    std::map<std::tuple<std::size_t, std::size_t, std::size_t, std::size_t>, ScriptCollider> script_colliders_;
+    std::set<std::tuple<std::size_t, std::size_t, std::uint32_t>> collected_script_pickups_;
+    struct EscapeCopter {
+        std::size_t placement;
+        std::uint16_t start, done, restart_key, path_duration;
+        std::uint32_t flight_script, crash_script;
+        PathTrack path;
+        CutscenePlayer* flight = nullptr;
+        struct Hull {
+            std::size_t handle;
+            Placement model;
+        };
+        std::optional<Hull> hull = std::nullopt;
+        float clock = 0, health = 0, max_health = 0, smoke_wait = 0;
+        float attack_wait = 240, burst_remaining = 0, shot_wait = 0;
+        Mat4 pose = identity();
+        bool destroyed = false;
+    };
+    std::optional<EscapeCopter> escape_copter_;
+    std::optional<Vec3> copter_smoke_;
     std::vector<std::size_t> door_handles_;
+    std::unordered_map<std::size_t, std::size_t> breakable_models_;
     std::vector<Sound> sounds_;
     std::vector<Text> texts_;
     std::vector<Music> music_;

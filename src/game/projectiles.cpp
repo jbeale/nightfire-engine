@@ -223,10 +223,14 @@ WeaponSystem::SegmentHit WeaponSystem::trace_segment(const World& world, const V
         best.point = h.point;
         best.normal = h.normal;
         best.surface = h.material & 0x3F;
+        best.placement = h.placement;
     };
     if (auto h = world.collision().ray(from, to, pick)) apply_surface(*h);
     if (const auto* moving = world.objects().moving_meshes()) {
-        if (auto h = moving->ray(from, to, pick); h && (!best.world || h->dist < best.t * len)) apply_surface(*h);
+        // Animated window panes use material 0x10 on their object collider, like the
+        // gondola's glass. The world-water exclusion applies only to the static sweep.
+        if (auto h = moving->ray(from, to, pick & ~pick::kIgnoreMaterial10);
+            h && (!best.world || h->dist < best.t * len)) apply_surface(*h);
     }
     if (const auto* scenery = world.objects().scenery()) {
         if (auto h = scenery->ray(from, to, pick); h && (!best.world || h->dist < best.t * len)) {
@@ -248,6 +252,7 @@ WeaponSystem::SegmentHit WeaponSystem::trace_segment(const World& world, const V
             best.part = part_at(best.point, v.a, v.b, v.radius);
             best.surface = 0;
             best.scenery = SIZE_MAX;
+            best.placement = SIZE_MAX;
         }
     }
     return best;
@@ -369,7 +374,12 @@ void WeaponSystem::bullet_hit(Projectile& b, const SegmentHit& hit, const Weapon
     const bool on_body = !hit.world;
     // (Taser validity is decided pre-spawn in init_bullet now; a world hit here only happens when the victim
     // moved away mid-flight, so the round stays spent.)
-    events_.impacts.push_back({hit.point, hit.normal, hit.surface, def.id, on_body, b.owner});
+    events_.impacts.push_back({hit.point, hit.normal, hit.surface, def.id, on_body, b.owner, hit.placement});
+    if ((def.flags2 & wf2::kLaserBeam) != 0) {
+        b.pos = hit.point;
+        b.delete_me = true;
+        return;  // cutting beams heat locks through the impact event
+    }
     if (on_body) {
         float dmg = def.damage;
         if (def.blast_radius > 0.0f) {   // splash weapons: direct damage is 1 or 0, the explosion does the rest
@@ -480,6 +490,23 @@ bool WeaponSystem::step_projectile(Projectile& b, World& world, FrameTiming timi
     } else if (def.range < b.travelled) {
         return false;                               // state 4: out of range
     }
+    if ((def.flags2 & wf2::kGuided) != 0 && b.owner >= 0 && b.owner < World::kMaxPlayers) {
+        const auto& input = world.input(b.owner);
+        constexpr float turn_per_frame = 0.024543693f;  // Bullet_update, in radians at full deflection
+        const MouseLook mouse = input.mouse_look();
+        const float limit = turn_per_frame * mul;
+        float yaw_step = -input.actionf(kActTurn) * turn_per_frame * mul;
+        float pitch_step = input.actionf(kActLookPitch) * turn_per_frame * mul;
+        if (mouse.moved()) {
+            yaw_step = std::clamp(yaw_step + mouse.yaw, -limit, limit);
+            pitch_step = std::clamp(pitch_step + mouse.pitch, -limit, limit);
+        }
+        const float yaw = std::atan2(b.dir[0], b.dir[2]) + yaw_step;
+        const float pitch = std::clamp(std::asin(std::clamp(b.dir[1], -1.0f, 1.0f)) +
+                                      pitch_step, -1.47075f, 1.47075f);
+        const float c = std::cos(pitch);
+        b.dir = {std::sin(yaw) * c, std::sin(pitch), std::cos(yaw) * c};
+    }
     if ((def.flags2 & wf2::kGravity) && !b.resting) {
         // dir = normalise(dir * speed + WldGravity * dt^2), with speed in units per 60 Hz frame.
         const float dt = timing.rec();
@@ -495,6 +522,11 @@ bool WeaponSystem::step_projectile(Projectile& b, World& world, FrameTiming timi
     const Vec3 to = b.pos + b.dir * step;
     const SegmentHit hit =
         trace_segment(world, b.pos, to, b.owner, victims, (def.flags2 & wf2::kSolidWater) != 0, b.ignored_target);
+    if ((def.flags2 & wf2::kLaserBeam) != 0) {
+        const Vec3 right = normalized(cross(Vec3{0, 1, 0}, b.dir));
+        events_.beams.push_back({b.pos + right * .14f + Vec3{0, -.17f, 0},
+                                 hit.world || hit.victim >= 0 ? hit.point : to});
+    }
     if ((def.flags3 & wf3::kGrapple) != 0 && b.owner >= 0 && b.owner < World::kMaxPlayers) {
         if (const auto hook = world.rope_world().grapple_ray(b.pos, to);
             hook && ((!hit.world && hit.victim < 0) || length(hook->point - b.pos) <= hit.t * step + 0.1f)) {
@@ -510,6 +542,10 @@ bool WeaponSystem::step_projectile(Projectile& b, World& world, FrameTiming timi
         return !b.delete_me;
     }
     b.pos = to;
+    // Bullet_DoTrails accelerates these rockets from the quarter-speed launch
+    // to the weapon table's cruising speed.
+    if ((def.flags2 & wf2::kQuarterSpeed) != 0 && b.speed < def.speed)
+        b.speed = std::min(def.speed, b.speed + def.speed * .02f * mul);
     return true;
 }
 
@@ -525,8 +561,8 @@ void WeaponSystem::step_projectiles(World& world, FrameTiming timing) {
 }
 
 // Helpers for detonators, guided missiles and weapon locks.
-Projectile* WeaponSystem::find_guided(int owner) {
-    for (Projectile& b : projectiles_) {
+const Projectile* WeaponSystem::guided_projectile(int owner) const {
+    for (const Projectile& b : projectiles_) {
         if (!b.delete_me && b.owner == owner && (table_.weapon(b.weapon).flags2 & wf2::kGuided) != 0) return &b;
     }
     return nullptr;

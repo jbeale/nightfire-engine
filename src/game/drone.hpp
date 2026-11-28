@@ -216,6 +216,7 @@ public:
     std::uint8_t alt_channel = 0;       // +0x135 (alt mode switch)
     bool alt_channel_snapshot = false;        // +0x137
     bool hidden = false;                // obj+0xf0 & 0x10: not drawn, not controlled (NDrone2_Enable(false))
+    bool riding_scripted_platform = false;
     bool ghost = false;                 // obj+0xf0 & 0x20: no longer hit by bullets
     std::uint32_t carried_item = 0;     // +0xbd4 (key card etc.)
     bool death_pending_channel = false; // +0xcd8
@@ -384,11 +385,13 @@ public:
         int end_state = 0, end_msg = 0; // applied end handler (+0x596/+0x598)
         bool applied = false;           // +0x57b the request has been turned into a clip
         bool clip_running = false;      // +0x579 non-looping clip not yet finished
+        bool clip_end_event = false;    // script signaled completion before its last frame
         bool loop = true;
         bool source_gate_valid = false; // one-tick v5 AnimObjectUpdate eligibility from source Drone_Control
         bool source_update_due = true;  // NDrone2_DoAnimation or frame-stamp equality
         float source_root_yaw = 0;
         float source_root_height_offset = 0; // v5 recorded sAnimObject+0x60 offset over the sampled root pose
+        std::optional<float> height_offset;  // campaign character rig's root-to-collision height correction
         bool source_collision_due = true; // v5 NDrone2_DoCollision result for this restored bot snapshot
         bool source_collision_valid = false; // v5 eligibility snapshot, consumed by collision_step once
         bool source_gravity_due = true; // v5 NDrone2_DoGravity result for this restored bot snapshot
@@ -427,7 +430,6 @@ public:
     } mv;
     DroneLook look;
     std::unique_ptr<CharacterInstance> character;   // owned by the drone; created by DroneSystem::spawn
-    std::optional<float> death_start_root_height;    // vertical animation origin for grounded campaign deaths
     std::unique_ptr<NavAgent> nav;                  // routes / goals (null when the level has no nav network)
     bool fresh = true;                              // Global ENTER not delivered yet (runs on the first tick)
 
